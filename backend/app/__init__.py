@@ -1,1 +1,1 @@
-"""AniVideos Python API package."""
+"""HTTP route modules."""

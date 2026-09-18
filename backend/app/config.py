@@ -25,6 +25,15 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     return values
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, '1' if default else '0').strip().lower()
+    if raw in {'1', 'true', 'yes', 'on'}:
+        return True
+    if raw in {'0', 'false', 'no', 'off'}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean value")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     host: str
@@ -34,8 +43,12 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     rate_limit_requests: int
     rate_limit_window_seconds: int
+    auth_rate_limit_requests: int
     max_request_bytes: int
     enable_docs: bool
+    session_cookie_name: str
+    session_ttl_hours: int
+    cookie_secure: bool
 
 
 def load_settings() -> Settings:
@@ -52,8 +65,12 @@ def load_settings() -> Settings:
         allowed_hosts=_csv_env('ANIVIDEOS_ALLOWED_HOSTS', '127.0.0.1,localhost,testserver'),
         rate_limit_requests=_positive_int('ANIVIDEOS_RATE_LIMIT_REQUESTS', 180),
         rate_limit_window_seconds=_positive_int('ANIVIDEOS_RATE_LIMIT_WINDOW_SECONDS', 60),
+        auth_rate_limit_requests=_positive_int('ANIVIDEOS_AUTH_RATE_LIMIT_REQUESTS', 12),
         max_request_bytes=_positive_int('ANIVIDEOS_MAX_REQUEST_BYTES', 1048576),
-        enable_docs=os.getenv('ANIVIDEOS_ENABLE_DOCS', '0').strip() == '1',
+        enable_docs=_bool_env('ANIVIDEOS_ENABLE_DOCS', False),
+        session_cookie_name=os.getenv('ANIVIDEOS_SESSION_COOKIE', 'anivideos_session').strip() or 'anivideos_session',
+        session_ttl_hours=_positive_int('ANIVIDEOS_SESSION_TTL_HOURS', 168),
+        cookie_secure=_bool_env('ANIVIDEOS_COOKIE_SECURE', False),
     )
 
 
