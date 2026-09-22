@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(email) BETWEEN 5 AND 254),
     password_hash TEXT NOT NULL CHECK(length(password_hash) BETWEEN 20 AND 255),
     avatar_url TEXT CHECK(avatar_url IS NULL OR length(avatar_url) <= 500),
+    display_name TEXT CHECK(display_name IS NULL OR length(trim(display_name)) BETWEEN 1 AND 60),
+    bio TEXT CHECK(bio IS NULL OR length(bio) <= 280),
     is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

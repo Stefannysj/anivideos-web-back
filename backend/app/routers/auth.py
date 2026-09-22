@@ -5,6 +5,7 @@ import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
+from app.auth_dependencies import require_current_user
 from app.auth_security import (
     generate_session_token,
     hash_password,
@@ -26,13 +27,16 @@ from app.schemas import AuthResponse, LoginRequest, MessageResponse, RegisterReq
 router = APIRouter()
 
 
-def _public_user(user: dict[str, object]) -> UserResponse:
+def public_user(user: dict[str, object]) -> UserResponse:
     return UserResponse(
         id=int(user['id']),
         username=str(user['username']),
         email=str(user['email']),
         avatar_url=str(user['avatar_url']) if user['avatar_url'] else None,
+        display_name=str(user['display_name']) if user.get('display_name') else None,
+        bio=str(user['bio']) if user.get('bio') else None,
         created_at=str(user['created_at']),
+        updated_at=str(user['updated_at']),
     )
 
 
@@ -52,18 +56,6 @@ def _issue_session(response: Response, user_id: int) -> None:
     )
 
 
-def _current_user(request: Request) -> dict[str, object]:
-    token = request.cookies.get(settings.session_cookie_name)
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Authentication required')
-    user = get_user_by_session(
-        hash_session_token(token),
-        int(datetime.now(timezone.utc).timestamp()),
-    )
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Authentication required')
-    return user
-
 
 @router.post('/auth/register', response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, response: Response) -> AuthResponse:
@@ -76,7 +68,7 @@ def register(payload: RegisterRequest, response: Response) -> AuthResponse:
             detail='No fue posible registrar esa cuenta. Revisa usuario y correo.',
         ) from exc
     _issue_session(response, int(user['id']))
-    return AuthResponse(user=_public_user(user))
+    return AuthResponse(user=public_user(user))
 
 
 @router.post('/auth/login', response_model=AuthResponse)
@@ -92,12 +84,12 @@ def login(payload: LoginRequest, response: Response) -> AuthResponse:
         update_user_password_hash(int(user['id']), hash_password(password))
 
     _issue_session(response, int(user['id']))
-    return AuthResponse(user=_public_user(user))
+    return AuthResponse(user=public_user(user))
 
 
 @router.get('/auth/me', response_model=AuthResponse)
 def me(request: Request) -> AuthResponse:
-    return AuthResponse(user=_public_user(_current_user(request)))
+    return AuthResponse(user=public_user(require_current_user(request)))
 
 
 @router.post('/auth/logout', response_model=MessageResponse)

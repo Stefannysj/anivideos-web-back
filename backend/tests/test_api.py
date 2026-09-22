@@ -16,6 +16,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     import app.routers.catalog as catalog
     import app.routers.banners as banners
     import app.routers.auth as auth
+    import app.routers.profile as profile
     import app.main as main
 
     importlib.reload(config)
@@ -24,6 +25,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     importlib.reload(catalog)
     importlib.reload(banners)
     importlib.reload(auth)
+    importlib.reload(profile)
     main = importlib.reload(main)
     return TestClient(main.app)
 

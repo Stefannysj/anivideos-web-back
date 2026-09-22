@@ -31,6 +31,14 @@ def connection(database_path: Path | None = None) -> Iterator[sqlite3.Connection
         conn.close()
 
 
+def _ensure_user_profile_columns(conn: sqlite3.Connection) -> None:
+    columns = {str(row['name']) for row in conn.execute('PRAGMA table_info(users)').fetchall()}
+    if 'display_name' not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT CHECK(display_name IS NULL OR length(trim(display_name)) BETWEEN 1 AND 60)")
+    if 'bio' not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN bio TEXT CHECK(bio IS NULL OR length(bio) <= 280)")
+
+
 def initialize_database(database_path: Path | None = None) -> None:
     path = _path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,6 +48,7 @@ def initialize_database(database_path: Path | None = None) -> None:
         conn.execute('PRAGMA journal_mode = WAL')
         conn.execute('PRAGMA synchronous = NORMAL')
         conn.executescript(schema)
+        _ensure_user_profile_columns(conn)
         conn.executescript(seed)
         conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (int(datetime.now(timezone.utc).timestamp()),))
         conn.commit()
@@ -136,7 +145,7 @@ def create_user(
 def get_user_by_id(user_id: int, database_path: Path | None = None) -> dict[str, object] | None:
     with connection(database_path) as conn:
         row = conn.execute(
-            '''SELECT id, username, email, password_hash, avatar_url, is_active, created_at
+            '''SELECT id, username, email, password_hash, avatar_url, display_name, bio, is_active, created_at, updated_at
                  FROM users
                 WHERE id = ?''',
             (user_id,),
@@ -147,7 +156,7 @@ def get_user_by_id(user_id: int, database_path: Path | None = None) -> dict[str,
 def get_user_by_identifier(identifier: str, database_path: Path | None = None) -> dict[str, object] | None:
     with connection(database_path) as conn:
         row = conn.execute(
-            '''SELECT id, username, email, password_hash, avatar_url, is_active, created_at
+            '''SELECT id, username, email, password_hash, avatar_url, display_name, bio, is_active, created_at, updated_at
                  FROM users
                 WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE
                 LIMIT 1''',
@@ -186,7 +195,7 @@ def get_user_by_session(
 ) -> dict[str, object] | None:
     with connection(database_path) as conn:
         row = conn.execute(
-            '''SELECT u.id, u.username, u.email, u.password_hash, u.avatar_url, u.is_active, u.created_at
+            '''SELECT u.id, u.username, u.email, u.password_hash, u.avatar_url, u.display_name, u.bio, u.is_active, u.created_at, u.updated_at
                  FROM auth_sessions s
                  JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = ?
@@ -204,6 +213,31 @@ def delete_auth_session(token_hash: str, database_path: Path | None = None) -> N
         conn.commit()
 
 
+def update_user_profile(
+    user_id: int,
+    *,
+    username: str,
+    email: str,
+    display_name: str | None,
+    bio: str | None,
+    database_path: Path | None = None,
+) -> dict[str, object]:
+    with connection(database_path) as conn:
+        conn.execute(
+            """UPDATE users
+                  SET username = ?, email = ?, display_name = ?, bio = ?,
+                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?""",
+            (username, email, display_name, bio, user_id),
+        )
+        conn.commit()
+    user = get_user_by_id(user_id, database_path)
+    if user is None:
+        raise RuntimeError('User profile update failed')
+    return user
+
+
+
 def count_auth_sessions(database_path: Path | None = None) -> int:
     with connection(database_path) as conn:
         row = conn.execute('SELECT COUNT(*) AS total FROM auth_sessions').fetchone()
@@ -219,6 +253,9 @@ def _user_row(row: sqlite3.Row | None) -> dict[str, object] | None:
         'email': row['email'],
         'password_hash': row['password_hash'],
         'avatar_url': row['avatar_url'],
+        'display_name': row['display_name'],
+        'bio': row['bio'],
         'is_active': bool(row['is_active']),
         'created_at': row['created_at'],
+        'updated_at': row['updated_at'],
     }

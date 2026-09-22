@@ -106,12 +106,68 @@ class LoginRequest(ApiModel):
         return value
 
 
+class ProfileUpdateRequest(ApiModel):
+    username: str | None = None
+    email: str | None = None
+    display_name: str | None = Field(default=None, max_length=60, validation_alias='displayName')
+    bio: str | None = Field(default=None, max_length=280)
+    current_password: SecretStr | None = Field(default=None, max_length=128, validation_alias='currentPassword')
+
+    @field_validator('username')
+    @classmethod
+    def valid_optional_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not _USERNAME_RE.fullmatch(normalized):
+            raise ValueError('Use 3-30 caracteres: letras, números, punto, guion o guion bajo.')
+        return normalized
+
+    @field_validator('email')
+    @classmethod
+    def valid_optional_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            result = validate_email(value.strip(), check_deliverability=False)
+        except EmailNotValidError as exc:
+            raise ValueError('Correo electrónico inválido.') from exc
+        return result.normalized.lower()
+
+    @field_validator('display_name')
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = ' '.join(value.strip().split())
+        if not normalized:
+            return None
+        if len(normalized) > 60:
+            raise ValueError('El nombre visible admite hasta 60 caracteres.')
+        return normalized
+
+    @field_validator('bio')
+    @classmethod
+    def normalize_bio(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if len(normalized) > 280:
+            raise ValueError('La biografía admite hasta 280 caracteres.')
+        return normalized
+
+
 class UserResponse(ApiModel):
     id: int
     username: str
     email: str
     avatar_url: str | None = Field(default=None, serialization_alias='avatarUrl')
+    display_name: str | None = Field(default=None, serialization_alias='displayName')
+    bio: str | None = None
     created_at: str = Field(serialization_alias='createdAt')
+    updated_at: str = Field(serialization_alias='updatedAt')
 
 
 class AuthResponse(ApiModel):
