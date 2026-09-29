@@ -181,3 +181,35 @@ class MessageResponse(ApiModel):
 class FavoriteStateResponse(ApiModel):
     content_id: str = Field(serialization_alias='contentId')
     is_favorite: bool = Field(serialization_alias='isFavorite')
+
+
+class BannerCommentCreateRequest(ApiModel):
+    body: str = Field(min_length=1, max_length=1000)
+
+    @field_validator('body')
+    @classmethod
+    def normalize_body(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError('El comentario no puede estar vacío.')
+        if len(normalized) > 1000:
+            raise ValueError('El comentario admite hasta 1000 caracteres.')
+        return normalized
+
+
+class BannerCommentAuthorResponse(ApiModel):
+    username: str
+    display_name: str | None = Field(default=None, serialization_alias='displayName')
+
+
+class BannerCommentResponse(ApiModel):
+    id: int
+    banner_id: str = Field(serialization_alias='bannerId')
+    body: str
+    author: BannerCommentAuthorResponse
+    created_at: str = Field(serialization_alias='createdAt')
+    is_owner: bool = Field(serialization_alias='isOwner')
+
+
+class BannerCommentListResponse(ApiModel):
+    items: list[BannerCommentResponse]

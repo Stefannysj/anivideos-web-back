@@ -44,6 +44,7 @@ class Settings:
     rate_limit_requests: int
     rate_limit_window_seconds: int
     auth_rate_limit_requests: int
+    comment_rate_limit_requests: int
     max_request_bytes: int
     enable_docs: bool
     session_cookie_name: str
@@ -66,6 +67,7 @@ def load_settings() -> Settings:
         rate_limit_requests=_positive_int('ANIVIDEOS_RATE_LIMIT_REQUESTS', 180),
         rate_limit_window_seconds=_positive_int('ANIVIDEOS_RATE_LIMIT_WINDOW_SECONDS', 60),
         auth_rate_limit_requests=_positive_int('ANIVIDEOS_AUTH_RATE_LIMIT_REQUESTS', 12),
+        comment_rate_limit_requests=_positive_int('ANIVIDEOS_COMMENT_RATE_LIMIT_REQUESTS', 20),
         max_request_bytes=_positive_int('ANIVIDEOS_MAX_REQUEST_BYTES', 1048576),
         enable_docs=_bool_env('ANIVIDEOS_ENABLE_DOCS', False),
         session_cookie_name=os.getenv('ANIVIDEOS_SESSION_COOKIE', 'anivideos_session').strip() or 'anivideos_session',

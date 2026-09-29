@@ -312,3 +312,86 @@ def remove_favorite(user_id: int, content_id: str, database_path: Path | None = 
             (user_id, content_id),
         )
         conn.commit()
+
+
+def banner_exists(banner_id: str, database_path: Path | None = None) -> bool:
+    with connection(database_path) as conn:
+        row = conn.execute('SELECT 1 FROM featured_banners WHERE id = ?', (banner_id,)).fetchone()
+    return row is not None
+
+
+def list_banner_comments(
+    banner_id: str,
+    viewer_user_id: int | None = None,
+    database_path: Path | None = None,
+) -> list[dict[str, object]]:
+    viewer_id = viewer_user_id if viewer_user_id is not None else -1
+    query = '''
+        SELECT c.id, c.banner_id, c.body, c.created_at,
+               u.username, u.display_name,
+               CASE WHEN c.user_id = ? THEN 1 ELSE 0 END AS is_owner
+          FROM banner_comments c
+          JOIN users u ON u.id = c.user_id
+         WHERE c.banner_id = ?
+         ORDER BY c.created_at DESC, c.id DESC
+    '''
+    with connection(database_path) as conn:
+        rows = conn.execute(query, (viewer_id, banner_id)).fetchall()
+    return [_banner_comment_row(row) for row in rows]
+
+
+def create_banner_comment(
+    banner_id: str,
+    user_id: int,
+    body: str,
+    database_path: Path | None = None,
+) -> dict[str, object] | None:
+    with connection(database_path) as conn:
+        banner = conn.execute('SELECT 1 FROM featured_banners WHERE id = ?', (banner_id,)).fetchone()
+        if banner is None:
+            return None
+        cursor = conn.execute(
+            'INSERT INTO banner_comments (banner_id, user_id, body) VALUES (?, ?, ?)',
+            (banner_id, user_id, body),
+        )
+        comment_id = int(cursor.lastrowid)
+        conn.commit()
+        row = conn.execute(
+            '''SELECT c.id, c.banner_id, c.body, c.created_at,
+                      u.username, u.display_name, 1 AS is_owner
+                 FROM banner_comments c
+                 JOIN users u ON u.id = c.user_id
+                WHERE c.id = ? AND c.banner_id = ?''',
+            (comment_id, banner_id),
+        ).fetchone()
+    return _banner_comment_row(row) if row is not None else None
+
+
+def delete_banner_comment(
+    banner_id: str,
+    comment_id: int,
+    user_id: int,
+    database_path: Path | None = None,
+) -> bool:
+    """Deletes only a comment owned by the authenticated user."""
+    with connection(database_path) as conn:
+        cursor = conn.execute(
+            'DELETE FROM banner_comments WHERE id = ? AND banner_id = ? AND user_id = ?',
+            (comment_id, banner_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+def _banner_comment_row(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        'id': int(row['id']),
+        'banner_id': str(row['banner_id']),
+        'body': str(row['body']),
+        'author': {
+            'username': str(row['username']),
+            'display_name': str(row['display_name']) if row['display_name'] else None,
+        },
+        'created_at': str(row['created_at']),
+        'is_owner': bool(row['is_owner']),
+    }

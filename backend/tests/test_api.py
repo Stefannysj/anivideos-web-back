@@ -14,6 +14,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     import app.database as database
     import app.routers.health as health
     import app.routers.favorites as favorites
+    import app.routers.comments as comments
     import app.routers.catalog as catalog
     import app.routers.banners as banners
     import app.routers.auth as auth
@@ -24,6 +25,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     importlib.reload(database)
     importlib.reload(health)
     importlib.reload(favorites)
+    importlib.reload(comments)
     importlib.reload(catalog)
     importlib.reload(banners)
     importlib.reload(auth)

@@ -13,12 +13,13 @@ from app.config import settings
 from app.database import initialize_database
 from app.middleware.security import (
     AuthRateLimitMiddleware,
+    CommentRateLimitMiddleware,
     CsrfOriginMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
 )
-from app.routers import auth, banners, catalog, favorites, health, profile
+from app.routers import auth, banners, catalog, comments, favorites, health, profile
 
 logger = logging.getLogger('anivideos')
 
@@ -31,7 +32,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title='AniVideos API',
-    version='0.9.0',
+    version='0.10.0',
     lifespan=lifespan,
     docs_url='/docs' if settings.enable_docs else None,
     redoc_url=None,
@@ -58,6 +59,11 @@ app.add_middleware(
     window_seconds=settings.rate_limit_window_seconds,
 )
 app.add_middleware(
+    CommentRateLimitMiddleware,
+    requests=settings.comment_rate_limit_requests,
+    window_seconds=settings.rate_limit_window_seconds,
+)
+app.add_middleware(
     CsrfOriginMiddleware,
     cookie_name=settings.session_cookie_name,
     allowed_origins=settings.allowed_origins,
@@ -67,6 +73,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(health.router, prefix='/api', tags=['health'])
 app.include_router(catalog.router, prefix='/api', tags=['catalog'])
 app.include_router(banners.router, prefix='/api', tags=['banners'])
+app.include_router(comments.router, prefix='/api', tags=['comments'])
 app.include_router(auth.router, prefix='/api', tags=['auth'])
 app.include_router(profile.router, prefix='/api', tags=['profile'])
 app.include_router(favorites.router, prefix='/api', tags=['favorites'])

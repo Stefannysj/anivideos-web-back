@@ -77,6 +77,20 @@ class AuthRateLimitMiddleware(RateLimitMiddleware):
         return response or await call_next(request)
 
 
+class CommentRateLimitMiddleware(RateLimitMiddleware):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        path = request.url.path
+        is_comment_write = (
+            request.method in {'POST', 'DELETE'}
+            and path.startswith('/api/banners/')
+            and '/comments' in path
+        )
+        if not is_comment_write:
+            return await call_next(request)
+        response = self._check(request, 'banner-comments-write')
+        return response or await call_next(request)
+
+
 class CsrfOriginMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, cookie_name: str, allowed_origins: tuple[str, ...]) -> None:
         super().__init__(app)
