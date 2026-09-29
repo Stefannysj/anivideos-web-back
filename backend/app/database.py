@@ -259,3 +259,56 @@ def _user_row(row: sqlite3.Row | None) -> dict[str, object] | None:
         'created_at': row['created_at'],
         'updated_at': row['updated_at'],
     }
+
+
+def list_favorites(user_id: int, database_path: Path | None = None) -> list[dict[str, object]]:
+    query = '''
+        SELECT c.id, c.title, c.category, c.category_label, c.release_year, c.score,
+               c.maturity, c.format, c.genres_json, c.artwork
+          FROM favorites f
+          JOIN content_items c ON c.id = f.content_id
+         WHERE f.user_id = ?
+         ORDER BY f.created_at DESC, c.display_order ASC
+    '''
+    with connection(database_path) as conn:
+        rows = conn.execute(query, (user_id,)).fetchall()
+
+    return [
+        {
+            'id': row['id'],
+            'title': row['title'],
+            'category': row['category'],
+            'category_label': row['category_label'],
+            'year': row['release_year'],
+            'score': row['score'],
+            'maturity': row['maturity'],
+            'format': row['format'],
+            'genres': json.loads(row['genres_json']),
+            'artwork': row['artwork'],
+        }
+        for row in rows
+    ]
+
+
+def add_favorite(user_id: int, content_id: str, database_path: Path | None = None) -> bool:
+    """Adds one catalog item idempotently. Returns False when the content id does not exist."""
+    with connection(database_path) as conn:
+        exists = conn.execute('SELECT 1 FROM content_items WHERE id = ?', (content_id,)).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            'INSERT OR IGNORE INTO favorites (user_id, content_id) VALUES (?, ?)',
+            (user_id, content_id),
+        )
+        conn.commit()
+    return True
+
+
+def remove_favorite(user_id: int, content_id: str, database_path: Path | None = None) -> None:
+    """Removes one favorite idempotently without exposing whether another user saved the item."""
+    with connection(database_path) as conn:
+        conn.execute(
+            'DELETE FROM favorites WHERE user_id = ? AND content_id = ?',
+            (user_id, content_id),
+        )
+        conn.commit()

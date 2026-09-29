@@ -18,7 +18,7 @@ from app.middleware.security import (
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
 )
-from app.routers import auth, banners, catalog, health, profile
+from app.routers import auth, banners, catalog, favorites, health, profile
 
 logger = logging.getLogger('anivideos')
 
@@ -31,7 +31,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title='AniVideos API',
-    version='0.8.0',
+    version='0.9.0',
     lifespan=lifespan,
     docs_url='/docs' if settings.enable_docs else None,
     redoc_url=None,
@@ -69,6 +69,7 @@ app.include_router(catalog.router, prefix='/api', tags=['catalog'])
 app.include_router(banners.router, prefix='/api', tags=['banners'])
 app.include_router(auth.router, prefix='/api', tags=['auth'])
 app.include_router(profile.router, prefix='/api', tags=['profile'])
+app.include_router(favorites.router, prefix='/api', tags=['favorites'])
 
 
 @app.exception_handler(RequestValidationError)

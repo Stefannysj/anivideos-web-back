@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS favorites (
     FOREIGN KEY (content_id) REFERENCES content_items(id) ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_favorites_user_created
+    ON favorites(user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS banner_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     banner_id TEXT NOT NULL,

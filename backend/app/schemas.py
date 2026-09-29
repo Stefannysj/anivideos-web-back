@@ -176,3 +176,8 @@ class AuthResponse(ApiModel):
 
 class MessageResponse(ApiModel):
     message: str
+
+
+class FavoriteStateResponse(ApiModel):
+    content_id: str = Field(serialization_alias='contentId')
+    is_favorite: bool = Field(serialization_alias='isFavorite')
