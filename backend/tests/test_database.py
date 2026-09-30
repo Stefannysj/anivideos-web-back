@@ -47,3 +47,21 @@ def test_initialize_database_migrates_stage07_users_table(tmp_path: Path) -> Non
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute('PRAGMA table_info(users)').fetchall()}
     assert {'display_name', 'bio'} <= columns
+
+
+def test_catalog_database_filters_are_composable(tmp_path: Path) -> None:
+    database = tmp_path / 'filters.db'
+    initialize_database(database)
+
+    rows = list_content(
+        category='movie',
+        database_path=database,
+        year=2026,
+        min_score=8.5,
+        sort='score-desc',
+    )
+    assert [row['title'] for row in rows] == ['Crimson Orbit', 'Final Frame', 'Last Ember']
+
+    assert [row['title'] for row in list_content(database_path=database, search='winter')] == ['Winter Letter']
+    assert len(list_content(database_path=database, genre='Misterio')) == 5
+    assert list_content(database_path=database, search='%') == []

@@ -63,20 +63,64 @@ def database_is_healthy(database_path: Path | None = None) -> bool:
         return False
 
 
-def list_content(category: str | None = None, database_path: Path | None = None) -> list[dict[str, object]]:
-    query = '''
+def _escape_like(value: str) -> str:
+    """Escapes LIKE wildcards so user input is treated as literal text."""
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+def list_content(
+    category: str | None = None,
+    database_path: Path | None = None,
+    *,
+    search: str | None = None,
+    genre: str | None = None,
+    year: int | None = None,
+    min_score: float | None = None,
+    sort: str = 'featured',
+) -> list[dict[str, object]]:
+    query = """
         SELECT id, title, category, category_label, release_year, score,
-               maturity, format, genres_json, artwork
+               maturity, format, genres_json, artwork, display_order
           FROM content_items
-    '''
-    params: tuple[object, ...] = ()
+    """
+    conditions: list[str] = []
+    params: list[object] = []
+
     if category is not None:
-        query += ' WHERE category = ?'
-        params = (category,)
-    query += ' ORDER BY display_order ASC'
+        conditions.append('category = ?')
+        params.append(category)
+
+    if search is not None and search.strip():
+        pattern = f"%{_escape_like(search.strip())}%"
+        conditions.append("(title LIKE ? ESCAPE '\\' COLLATE NOCASE OR genres_json LIKE ? ESCAPE '\\' COLLATE NOCASE)")
+        params.extend((pattern, pattern))
+
+    if genre is not None and genre.strip():
+        genre_pattern = f'%"{_escape_like(genre.strip())}"%'
+        conditions.append("genres_json LIKE ? ESCAPE '\\' COLLATE NOCASE")
+        params.append(genre_pattern)
+
+    if year is not None:
+        conditions.append('release_year = ?')
+        params.append(year)
+
+    if min_score is not None:
+        conditions.append('score >= ?')
+        params.append(min_score)
+
+    if conditions:
+        query += ' WHERE ' + ' AND '.join(conditions)
+
+    order_by = {
+        'featured': 'display_order ASC',
+        'title-asc': 'title COLLATE NOCASE ASC, display_order ASC',
+        'year-desc': 'release_year DESC, display_order ASC',
+        'score-desc': 'score DESC, display_order ASC',
+    }.get(sort, 'display_order ASC')
+    query += f' ORDER BY {order_by}'
 
     with connection(database_path) as conn:
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
 
     return [
         {

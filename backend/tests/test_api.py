@@ -59,3 +59,38 @@ def test_catalog_rejects_unknown_category(monkeypatch, tmp_path: Path) -> None:
         response = client.get('/api/catalog', params={'category': 'invalid'})
         assert response.status_code == 422
         assert response.json()['error']['code'] == 'VALIDATION_ERROR'
+
+
+def test_catalog_search_filters_and_sorting(monkeypatch, tmp_path: Path) -> None:
+    with build_client(monkeypatch, tmp_path) as client:
+        title_search = client.get('/api/catalog', params={'q': 'winter'})
+        assert title_search.status_code == 200
+        assert [item['title'] for item in title_search.json()['items']] == ['Winter Letter']
+
+        filtered = client.get(
+            '/api/catalog',
+            params={
+                'category': 'movie',
+                'year': 2026,
+                'minScore': 8.5,
+                'sort': 'score-desc',
+            },
+        )
+        assert filtered.status_code == 200
+        items = filtered.json()['items']
+        assert [item['title'] for item in items] == ['Crimson Orbit', 'Final Frame', 'Last Ember']
+
+        genre = client.get('/api/catalog', params={'genre': 'Romance', 'sort': 'title-asc'})
+        assert genre.status_code == 200
+        assert [item['title'] for item in genre.json()['items']] == ['Midnight Recipe', 'Paper Hearts', 'Winter Letter']
+
+
+def test_catalog_search_bounds_and_literal_wildcards(monkeypatch, tmp_path: Path) -> None:
+    with build_client(monkeypatch, tmp_path) as client:
+        assert client.get('/api/catalog', params={'minScore': 11}).status_code == 422
+        assert client.get('/api/catalog', params={'year': 1800}).status_code == 422
+        assert client.get('/api/catalog', params={'sort': 'invalid'}).status_code == 422
+
+        literal_wildcard = client.get('/api/catalog', params={'q': '%'})
+        assert literal_wildcard.status_code == 200
+        assert literal_wildcard.json()['items'] == []

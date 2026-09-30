@@ -89,3 +89,11 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
     ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
     ON auth_sessions(expires_at);
+
+-- Stage 11: indexes used by catalog filtering and ordering.
+CREATE INDEX IF NOT EXISTS idx_content_items_category
+    ON content_items(category);
+CREATE INDEX IF NOT EXISTS idx_content_items_release_year
+    ON content_items(release_year);
+CREATE INDEX IF NOT EXISTS idx_content_items_score
+    ON content_items(score);
