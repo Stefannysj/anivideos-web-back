@@ -39,6 +39,17 @@ def _ensure_user_profile_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN bio TEXT CHECK(bio IS NULL OR length(bio) <= 280)")
 
 
+
+def _ensure_content_detail_columns(conn: sqlite3.Connection) -> None:
+    columns = {str(row['name']) for row in conn.execute('PRAGMA table_info(content_items)').fetchall()}
+    if 'synopsis' not in columns:
+        conn.execute("ALTER TABLE content_items ADD COLUMN synopsis TEXT NOT NULL DEFAULT ''")
+    if 'origin' not in columns:
+        conn.execute("ALTER TABLE content_items ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
+    if 'status' not in columns:
+        conn.execute("ALTER TABLE content_items ADD COLUMN status TEXT NOT NULL DEFAULT ''")
+
+
 def initialize_database(database_path: Path | None = None) -> None:
     path = _path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +60,7 @@ def initialize_database(database_path: Path | None = None) -> None:
         conn.execute('PRAGMA synchronous = NORMAL')
         conn.executescript(schema)
         _ensure_user_profile_columns(conn)
+        _ensure_content_detail_columns(conn)
         conn.executescript(seed)
         conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (int(datetime.now(timezone.utc).timestamp()),))
         conn.commit()
@@ -137,6 +149,35 @@ def list_content(
         }
         for row in rows
     ]
+
+
+def get_content_by_id(content_id: str, database_path: Path | None = None) -> dict[str, object] | None:
+    query = """
+        SELECT id, title, category, category_label, release_year, score,
+               maturity, format, genres_json, artwork, synopsis, origin, status
+          FROM content_items
+         WHERE id = ?
+         LIMIT 1
+    """
+    with connection(database_path) as conn:
+        row = conn.execute(query, (content_id,)).fetchone()
+    if row is None:
+        return None
+    return {
+        'id': row['id'],
+        'title': row['title'],
+        'category': row['category'],
+        'category_label': row['category_label'],
+        'year': row['release_year'],
+        'score': row['score'],
+        'maturity': row['maturity'],
+        'format': row['format'],
+        'genres': json.loads(row['genres_json']),
+        'artwork': row['artwork'],
+        'synopsis': row['synopsis'],
+        'origin': row['origin'],
+        'status': row['status'],
+    }
 
 
 def list_banners(database_path: Path | None = None) -> list[dict[str, object]]:

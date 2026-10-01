@@ -32,7 +32,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title='AniVideos API',
-    version='0.11.0',
+    version='0.12.0',
     lifespan=lifespan,
     docs_url='/docs' if settings.enable_docs else None,
     redoc_url=None,

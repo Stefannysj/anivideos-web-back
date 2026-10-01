@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS content_items (
     format TEXT NOT NULL CHECK(length(format) BETWEEN 1 AND 80),
     genres_json TEXT NOT NULL,
     artwork TEXT NOT NULL CHECK(artwork LIKE '/posters/%.svg'),
+    synopsis TEXT NOT NULL DEFAULT '' CHECK(length(synopsis) <= 1200),
+    origin TEXT NOT NULL DEFAULT '' CHECK(length(origin) <= 80),
+    status TEXT NOT NULL DEFAULT '' CHECK(length(status) <= 40),
     display_order INTEGER NOT NULL DEFAULT 0 CHECK(display_order >= 0),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

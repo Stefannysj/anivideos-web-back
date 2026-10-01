@@ -1,9 +1,9 @@
 from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Path, Query, status
 
-from app.database import list_content
-from app.schemas import CatalogResponse, ContentItemResponse
+from app.database import get_content_by_id, list_content
+from app.schemas import CatalogResponse, ContentDetailResponse, ContentItemResponse
 
 router = APIRouter()
 Category = Literal['anime', 'k-drama', 'series', 'movie']
@@ -35,3 +35,14 @@ def catalog(
         )
     ]
     return CatalogResponse(items=items)
+
+
+@router.get('/catalog/{content_id}', response_model=ContentDetailResponse)
+def catalog_detail(
+    content_id: str = Path(min_length=1, max_length=80, pattern=r'^[a-z0-9-]+$'),
+) -> ContentDetailResponse:
+    """Returns one public catalog item by its stable id."""
+    item = get_content_by_id(content_id)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Content not found')
+    return ContentDetailResponse(**item)

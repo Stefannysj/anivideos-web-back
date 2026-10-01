@@ -94,3 +94,22 @@ def test_catalog_search_bounds_and_literal_wildcards(monkeypatch, tmp_path: Path
         literal_wildcard = client.get('/api/catalog', params={'q': '%'})
         assert literal_wildcard.status_code == 200
         assert literal_wildcard.json()['items'] == []
+
+
+def test_catalog_detail_by_id(monkeypatch, tmp_path: Path) -> None:
+    with build_client(monkeypatch, tmp_path) as client:
+        response = client.get('/api/catalog/anime-skybound-echo')
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['id'] == 'anime-skybound-echo'
+        assert payload['title'] == 'Skybound Echo'
+        assert payload['category'] == 'anime'
+        assert payload['synopsis']
+        assert payload['origin'] == 'Japon'
+        assert payload['status'] == 'En emision'
+
+        missing = client.get('/api/catalog/not-a-real-title')
+        assert missing.status_code == 404
+
+        invalid = client.get('/api/catalog/INVALID_ID')
+        assert invalid.status_code == 422

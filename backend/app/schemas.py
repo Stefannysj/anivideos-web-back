@@ -33,6 +33,12 @@ class ContentItemResponse(ApiModel):
     artwork: str
 
 
+class ContentDetailResponse(ContentItemResponse):
+    synopsis: str
+    origin: str
+    status: str
+
+
 class CatalogResponse(ApiModel):
     items: list[ContentItemResponse]
 
