@@ -100,3 +100,9 @@ CREATE INDEX IF NOT EXISTS idx_content_items_release_year
     ON content_items(release_year);
 CREATE INDEX IF NOT EXISTS idx_content_items_score
     ON content_items(score);
+
+-- Stage 15: composite indexes for common browse/sort paths.
+CREATE INDEX IF NOT EXISTS idx_content_items_category_year_score_order
+    ON content_items(category, release_year DESC, score DESC, display_order ASC);
+CREATE INDEX IF NOT EXISTS idx_content_items_title_nocase
+    ON content_items(title COLLATE NOCASE, display_order ASC);

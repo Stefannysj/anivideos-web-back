@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -35,7 +36,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title='AniVideos API',
-    version='0.14.0',
+    version='0.15.0',
     lifespan=lifespan,
     docs_url='/docs' if settings.enable_docs else None,
     redoc_url=None,
@@ -43,6 +44,7 @@ app = FastAPI(
 )
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=6)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.allowed_origins),

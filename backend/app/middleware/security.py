@@ -36,7 +36,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers['Content-Security-Policy'] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
         response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
         response.headers['X-DNS-Prefetch-Control'] = 'off'
-        response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'no-cache'
+        # Public endpoints may opt into bounded HTTP caching; private API responses remain no-store by default.
+        if 'Cache-Control' not in response.headers:
+            response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'no-cache'
         if request.url.scheme == 'https':
             response.headers['Strict-Transport-Security'] = f'max-age={self.hsts_max_age}; includeSubDomains'
         return response

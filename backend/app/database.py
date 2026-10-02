@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 import json
 from pathlib import Path
 import sqlite3
@@ -28,6 +29,8 @@ def connection(database_path: Path | None = None) -> Iterator[sqlite3.Connection
     conn.execute('PRAGMA secure_delete = ON')
     conn.execute('PRAGMA recursive_triggers = OFF')
     conn.execute('PRAGMA busy_timeout = 5000')
+    conn.execute('PRAGMA temp_store = MEMORY')
+    conn.execute('PRAGMA cache_size = -8192')
     try:
         yield conn
     finally:
@@ -66,7 +69,9 @@ def initialize_database(database_path: Path | None = None) -> None:
         _ensure_content_detail_columns(conn)
         conn.executescript(seed)
         conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (int(datetime.now(timezone.utc).timestamp()),))
+        conn.execute('PRAGMA optimize')
         conn.commit()
+    clear_public_query_caches()
 
 
 def database_is_healthy(database_path: Path | None = None) -> bool:
@@ -83,6 +88,7 @@ def _escape_like(value: str) -> str:
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
+@lru_cache(maxsize=256)
 def list_content(
     category: str | None = None,
     database_path: Path | None = None,
@@ -154,6 +160,7 @@ def list_content(
     ]
 
 
+@lru_cache(maxsize=128)
 def get_content_by_id(content_id: str, database_path: Path | None = None) -> dict[str, object] | None:
     query = """
         SELECT id, title, category, category_label, release_year, score,
@@ -183,6 +190,7 @@ def get_content_by_id(content_id: str, database_path: Path | None = None) -> dic
     }
 
 
+@lru_cache(maxsize=16)
 def list_banners(database_path: Path | None = None) -> list[dict[str, object]]:
     query = '''
         SELECT id, category, eyebrow, title, synopsis, release_year, age_rating,
@@ -209,6 +217,13 @@ def list_banners(database_path: Path | None = None) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+def clear_public_query_caches() -> None:
+    """Invalidates immutable public catalog caches after startup migrations/seeding."""
+    list_content.cache_clear()
+    get_content_by_id.cache_clear()
+    list_banners.cache_clear()
 
 
 def create_user(
