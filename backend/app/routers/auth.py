@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.auth_dependencies import require_current_user
 from app.auth_security import (
+    CSRF_HEADER_NAME,
+    csrf_token_for_session,
     generate_session_token,
     hash_password,
     hash_session_token,
@@ -19,7 +21,6 @@ from app.database import (
     create_user,
     delete_auth_session,
     get_user_by_identifier,
-    get_user_by_session,
     update_user_password_hash,
 )
 from app.schemas import AuthResponse, LoginRequest, MessageResponse, RegisterRequest, UserResponse
@@ -40,11 +41,24 @@ def public_user(user: dict[str, object]) -> UserResponse:
     )
 
 
-def _issue_session(response: Response, user_id: int) -> None:
+def _revoke_presented_session(request: Request) -> None:
+    current_token = request.cookies.get(settings.session_cookie_name)
+    if current_token:
+        delete_auth_session(hash_session_token(current_token))
+
+
+def _issue_session(request: Request, response: Response, user_id: int) -> None:
+    # Re-authentication rotates the session and revokes the token presented by this browser.
+    _revoke_presented_session(request)
     token = generate_session_token()
     ttl_seconds = settings.session_ttl_hours * 60 * 60
     expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp())
-    create_auth_session(user_id, hash_session_token(token), expires_at)
+    create_auth_session(
+        user_id,
+        hash_session_token(token),
+        expires_at,
+        max_sessions=settings.max_sessions_per_user,
+    )
     response.set_cookie(
         key=settings.session_cookie_name,
         value=token,
@@ -54,11 +68,17 @@ def _issue_session(response: Response, user_id: int) -> None:
         samesite='lax',
         path='/api',
     )
+    response.headers[CSRF_HEADER_NAME] = csrf_token_for_session(token)
 
+
+def _refresh_csrf_header(request: Request, response: Response) -> None:
+    token = request.cookies.get(settings.session_cookie_name)
+    if token:
+        response.headers[CSRF_HEADER_NAME] = csrf_token_for_session(token)
 
 
 @router.post('/auth/register', response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, response: Response) -> AuthResponse:
+def register(payload: RegisterRequest, request: Request, response: Response) -> AuthResponse:
     password = payload.password.get_secret_value()
     try:
         user = create_user(payload.username, payload.email, hash_password(password))
@@ -67,12 +87,12 @@ def register(payload: RegisterRequest, response: Response) -> AuthResponse:
             status_code=status.HTTP_409_CONFLICT,
             detail='No fue posible registrar esa cuenta. Revisa usuario y correo.',
         ) from exc
-    _issue_session(response, int(user['id']))
+    _issue_session(request, response, int(user['id']))
     return AuthResponse(user=public_user(user))
 
 
 @router.post('/auth/login', response_model=AuthResponse)
-def login(payload: LoginRequest, response: Response) -> AuthResponse:
+def login(payload: LoginRequest, request: Request, response: Response) -> AuthResponse:
     user = get_user_by_identifier(payload.identifier)
     password = payload.password.get_secret_value()
     stored_hash = str(user['password_hash']) if user is not None and bool(user['is_active']) else None
@@ -83,13 +103,15 @@ def login(payload: LoginRequest, response: Response) -> AuthResponse:
     if password_needs_rehash(str(user['password_hash'])):
         update_user_password_hash(int(user['id']), hash_password(password))
 
-    _issue_session(response, int(user['id']))
+    _issue_session(request, response, int(user['id']))
     return AuthResponse(user=public_user(user))
 
 
 @router.get('/auth/me', response_model=AuthResponse)
-def me(request: Request) -> AuthResponse:
-    return AuthResponse(user=public_user(require_current_user(request)))
+def me(request: Request, response: Response) -> AuthResponse:
+    user = require_current_user(request)
+    _refresh_csrf_header(request, response)
+    return AuthResponse(user=public_user(user))
 
 
 @router.post('/auth/logout', response_model=MessageResponse)

@@ -1,2 +1,10 @@
-# Created by pytest automatically.
-*
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+.env

@@ -24,6 +24,9 @@ def connection(database_path: Path | None = None) -> Iterator[sqlite3.Connection
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('PRAGMA trusted_schema = OFF')
+    conn.execute('PRAGMA secure_delete = ON')
+    conn.execute('PRAGMA recursive_triggers = OFF')
     conn.execute('PRAGMA busy_timeout = 5000')
     try:
         yield conn
@@ -264,11 +267,27 @@ def create_auth_session(
     token_hash: str,
     expires_at: int,
     database_path: Path | None = None,
+    *,
+    max_sessions: int = 5,
 ) -> None:
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
     with connection(database_path) as conn:
+        conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (now_epoch,))
         conn.execute(
             'INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)',
             (token_hash, user_id, expires_at),
+        )
+        conn.execute(
+            '''DELETE FROM auth_sessions
+                WHERE user_id = ?
+                  AND token_hash NOT IN (
+                      SELECT token_hash
+                        FROM auth_sessions
+                       WHERE user_id = ?
+                       ORDER BY rowid DESC
+                       LIMIT ?
+                  )''',
+            (user_id, user_id, max_sessions),
         )
         conn.commit()
 
@@ -296,6 +315,26 @@ def delete_auth_session(token_hash: str, database_path: Path | None = None) -> N
     with connection(database_path) as conn:
         conn.execute('DELETE FROM auth_sessions WHERE token_hash = ?', (token_hash,))
         conn.commit()
+
+
+def delete_other_auth_sessions(
+    user_id: int,
+    keep_token_hash: str,
+    database_path: Path | None = None,
+) -> None:
+    with connection(database_path) as conn:
+        conn.execute(
+            'DELETE FROM auth_sessions WHERE user_id = ? AND token_hash <> ?',
+            (user_id, keep_token_hash),
+        )
+        conn.commit()
+
+
+def delete_expired_auth_sessions(now_epoch: int, database_path: Path | None = None) -> int:
+    with connection(database_path) as conn:
+        cursor = conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (now_epoch,))
+        conn.commit()
+        return cursor.rowcount
 
 
 def update_user_profile(

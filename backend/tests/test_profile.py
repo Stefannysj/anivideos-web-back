@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tests.test_api import build_client
+from tests.test_api import build_client, mutation_headers
 
 
 REGISTER = {
@@ -23,7 +23,7 @@ def test_profile_can_update_public_fields(monkeypatch, tmp_path) -> None:
         response = client.patch(
             '/api/profile',
             json={'displayName': 'Stefanny S.', 'bio': 'Anime, dramas y cine para una buena noche.'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert response.status_code == 200
         user = response.json()['user']
@@ -42,14 +42,14 @@ def test_identity_change_requires_current_password(monkeypatch, tmp_path) -> Non
         missing_password = client.patch(
             '/api/profile',
             json={'username': 'new_profile_user'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert missing_password.status_code == 403
 
         wrong_password = client.patch(
             '/api/profile',
             json={'email': 'new@example.com', 'currentPassword': 'WrongPassword1'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert wrong_password.status_code == 403
 
@@ -60,7 +60,7 @@ def test_identity_change_requires_current_password(monkeypatch, tmp_path) -> Non
                 'email': 'new@example.com',
                 'currentPassword': REGISTER['password'],
             },
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert changed.status_code == 200
         assert changed.json()['user']['username'] == 'new_profile_user'
@@ -70,7 +70,7 @@ def test_identity_change_requires_current_password(monkeypatch, tmp_path) -> Non
 def test_profile_rejects_duplicate_identity(monkeypatch, tmp_path) -> None:
     with build_client(monkeypatch, tmp_path) as client:
         assert client.post('/api/auth/register', json=REGISTER).status_code == 201
-        assert client.post('/api/auth/logout', headers={'Origin': ORIGIN}).status_code == 200
+        assert client.post('/api/auth/logout', headers=mutation_headers(client)).status_code == 200
         assert client.post('/api/auth/register', json={
             'username': 'other_user',
             'email': 'other@example.com',
@@ -80,7 +80,7 @@ def test_profile_rejects_duplicate_identity(monkeypatch, tmp_path) -> None:
         conflict = client.patch(
             '/api/profile',
             json={'username': REGISTER['username'], 'currentPassword': 'OtherPass2026'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert conflict.status_code == 409
 
@@ -91,7 +91,7 @@ def test_profile_validation_limits_bio(monkeypatch, tmp_path) -> None:
         response = client.patch(
             '/api/profile',
             json={'bio': 'a' * 281},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert response.status_code == 422
 
@@ -102,6 +102,6 @@ def test_profile_rejects_null_identity_fields(monkeypatch, tmp_path) -> None:
         response = client.patch(
             '/api/profile',
             json={'username': None},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert response.status_code == 422

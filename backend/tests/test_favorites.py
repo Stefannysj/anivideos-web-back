@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.test_api import build_client
+from tests.test_api import build_client, mutation_headers
 
 
 REGISTER = {
@@ -29,18 +29,18 @@ def test_user_can_add_list_and_remove_favorite(monkeypatch, tmp_path: Path) -> N
         assert empty.status_code == 200
         assert empty.json()['items'] == []
 
-        saved = client.put(f'/api/favorites/{CONTENT_ID}', headers={'Origin': ORIGIN})
+        saved = client.put(f'/api/favorites/{CONTENT_ID}', headers=mutation_headers(client))
         assert saved.status_code == 200
         assert saved.json() == {'contentId': CONTENT_ID, 'isFavorite': True}
 
-        duplicate = client.put(f'/api/favorites/{CONTENT_ID}', headers={'Origin': ORIGIN})
+        duplicate = client.put(f'/api/favorites/{CONTENT_ID}', headers=mutation_headers(client))
         assert duplicate.status_code == 200
 
         listing = client.get('/api/favorites')
         assert listing.status_code == 200
         assert [item['id'] for item in listing.json()['items']] == [CONTENT_ID]
 
-        removed = client.delete(f'/api/favorites/{CONTENT_ID}', headers={'Origin': ORIGIN})
+        removed = client.delete(f'/api/favorites/{CONTENT_ID}', headers=mutation_headers(client))
         assert removed.status_code == 200
         assert removed.json() == {'contentId': CONTENT_ID, 'isFavorite': False}
         assert client.get('/api/favorites').json()['items'] == []
@@ -49,7 +49,7 @@ def test_user_can_add_list_and_remove_favorite(monkeypatch, tmp_path: Path) -> N
 def test_favorites_are_isolated_per_user(monkeypatch, tmp_path: Path) -> None:
     with build_client(monkeypatch, tmp_path) as first:
         assert first.post('/api/auth/register', json=REGISTER).status_code == 201
-        assert first.put(f'/api/favorites/{CONTENT_ID}', headers={'Origin': ORIGIN}).status_code == 200
+        assert first.put(f'/api/favorites/{CONTENT_ID}', headers=mutation_headers(first)).status_code == 200
 
     second_register = {
         'username': 'second_user',
@@ -68,5 +68,5 @@ def test_favorites_are_isolated_per_user(monkeypatch, tmp_path: Path) -> None:
 def test_unknown_content_cannot_be_favorited(monkeypatch, tmp_path: Path) -> None:
     with build_client(monkeypatch, tmp_path) as client:
         assert client.post('/api/auth/register', json=REGISTER).status_code == 201
-        response = client.put('/api/favorites/not-in-catalog', headers={'Origin': ORIGIN})
+        response = client.put('/api/favorites/not-in-catalog', headers=mutation_headers(client))
         assert response.status_code == 404

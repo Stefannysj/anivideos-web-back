@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.test_api import build_client
+from tests.test_api import build_client, mutation_headers
 
 ORIGIN = 'http://127.0.0.1:5173'
 BANNER_A = 'stellar-pulse'
@@ -36,7 +36,7 @@ def test_authenticated_user_can_publish_and_delete_own_comment(monkeypatch, tmp_
         created = client.post(
             f'/api/banners/{BANNER_A}/comments',
             json={'body': '  Gran banner.  '},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert created.status_code == 201
         payload = created.json()
@@ -51,7 +51,7 @@ def test_authenticated_user_can_publish_and_delete_own_comment(monkeypatch, tmp_
 
         removed = client.delete(
             f"/api/banners/{BANNER_A}/comments/{payload['id']}",
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert removed.status_code == 200
         assert client.get(f'/api/banners/{BANNER_A}/comments').json()['items'] == []
@@ -63,7 +63,7 @@ def test_comments_belong_to_exactly_one_banner(monkeypatch, tmp_path: Path) -> N
         assert client.post(
             f'/api/banners/{BANNER_A}/comments',
             json={'body': 'Solo Stellar'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         ).status_code == 201
 
         assert len(client.get(f'/api/banners/{BANNER_A}/comments').json()['items']) == 1
@@ -77,7 +77,7 @@ def test_user_cannot_delete_another_users_comment(monkeypatch, tmp_path: Path) -
         created = owner.post(
             f'/api/banners/{BANNER_A}/comments',
             json={'body': 'Comentario protegido'},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(owner),
         )
         comment_id = created.json()['id']
 
@@ -85,7 +85,7 @@ def test_user_cannot_delete_another_users_comment(monkeypatch, tmp_path: Path) -
         assert other.post('/api/auth/register', json=SECOND).status_code == 201
         denied = other.delete(
             f'/api/banners/{BANNER_A}/comments/{comment_id}',
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(other),
         )
         assert denied.status_code == 404
         listing = other.get(f'/api/banners/{BANNER_A}/comments')
@@ -98,14 +98,14 @@ def test_comment_validation_and_unknown_banner(monkeypatch, tmp_path: Path) -> N
         empty = client.post(
             f'/api/banners/{BANNER_A}/comments',
             json={'body': '   '},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert empty.status_code == 422
 
         too_long = client.post(
             f'/api/banners/{BANNER_A}/comments',
             json={'body': 'x' * 1001},
-            headers={'Origin': ORIGIN},
+            headers=mutation_headers(client),
         )
         assert too_long.status_code == 422
 

@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 import sqlite3
 
-from tests.test_api import build_client
+from tests.test_api import build_client, mutation_headers
 
 
 REGISTER = {
@@ -62,7 +62,7 @@ def test_login_logout_and_duplicate_registration(monkeypatch, tmp_path: Path) ->
         duplicate = client.post('/api/auth/register', json=REGISTER, headers={'Origin': origin})
         assert duplicate.status_code == 409
 
-        logout = client.post('/api/auth/logout', headers={'Origin': origin})
+        logout = client.post('/api/auth/logout', headers=mutation_headers(client, origin))
         assert logout.status_code == 200
         assert client.get('/api/auth/me').status_code == 401
 

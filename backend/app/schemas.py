@@ -2,22 +2,35 @@ from __future__ import annotations
 
 import re
 from typing import Literal
+import unicodedata
 
 from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 _USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]{3,30}$')
+_BIDI_CONTROL = frozenset('\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+
+
+def _plain_text(value: str, *, field_name: str, allow_newlines: bool) -> str:
+    normalized = value.replace('\r\n', '\n').replace('\r', '\n').strip()
+    for character in normalized:
+        if character in _BIDI_CONTROL:
+            raise ValueError(f'{field_name} contiene caracteres de control no permitidos.')
+        if unicodedata.category(character) == 'Cc' and not (
+            allow_newlines and character in {'\n', '\t'}
+        ):
+            raise ValueError(f'{field_name} contiene caracteres de control no permitidos.')
+    return normalized
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # Unknown input fields are rejected to avoid silent mass-assignment style mistakes.
+    model_config = ConfigDict(populate_by_name=True, extra='forbid')
 
 
 class HealthResponse(ApiModel):
     status: Literal['ok']
     service: Literal['anivideos-api']
-    database: Literal['ok']
-    database_engine: Literal['sqlite'] = Field(serialization_alias='databaseEngine')
 
 
 class ContentItemResponse(ApiModel):
@@ -145,7 +158,7 @@ class ProfileUpdateRequest(ApiModel):
     def normalize_display_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = ' '.join(value.strip().split())
+        normalized = ' '.join(_plain_text(value, field_name='El nombre visible', allow_newlines=False).split())
         if not normalized:
             return None
         if len(normalized) > 60:
@@ -157,7 +170,7 @@ class ProfileUpdateRequest(ApiModel):
     def normalize_bio(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
+        normalized = _plain_text(value, field_name='La biografía', allow_newlines=True)
         if not normalized:
             return None
         if len(normalized) > 280:
@@ -195,7 +208,7 @@ class BannerCommentCreateRequest(ApiModel):
     @field_validator('body')
     @classmethod
     def normalize_body(cls, value: str) -> str:
-        normalized = value.strip()
+        normalized = _plain_text(value, field_name='El comentario', allow_newlines=True)
         if not normalized:
             raise ValueError('El comentario no puede estar vacío.')
         if len(normalized) > 1000:

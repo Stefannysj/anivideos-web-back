@@ -3,6 +3,8 @@ import importlib
 
 from fastapi.testclient import TestClient
 
+ORIGIN = 'http://127.0.0.1:5173'
+
 
 def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv('ANIVIDEOS_DB_PATH', str(tmp_path / 'api.db'))
@@ -34,12 +36,20 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     return TestClient(main.app)
 
 
+def mutation_headers(client: TestClient, origin: str = ORIGIN) -> dict[str, str]:
+    response = client.get('/api/auth/me')
+    assert response.status_code == 200
+    csrf = response.headers.get('x-csrf-token')
+    assert csrf
+    return {'Origin': origin, 'X-CSRF-Token': csrf}
+
+
 def test_health_catalog_and_banners(monkeypatch, tmp_path: Path) -> None:
     with build_client(monkeypatch, tmp_path) as client:
         health_response = client.get('/api/health')
         assert health_response.status_code == 200
         assert health_response.json()['status'] == 'ok'
-        assert health_response.json()['database'] == 'ok'
+        assert set(health_response.json()) == {'status', 'service'}
 
         catalog_response = client.get('/api/catalog')
         assert catalog_response.status_code == 200
