@@ -1,1 +1,1 @@
-"""Application middleware."""
+"""AniVideos Python API package."""
