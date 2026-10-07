@@ -118,7 +118,13 @@ class JsonContentTypeMiddleware(BaseHTTPMiddleware):
             return True
         if request.method == 'POST' and path in {'/api/auth/login', '/api/auth/register'}:
             return True
-        return request.method == 'POST' and path.startswith('/api/banners/') and path.endswith('/comments')
+        if request.method == 'POST' and path.startswith('/api/banners/') and path.endswith('/comments'):
+            return True
+        if request.method == 'PUT' and path.startswith('/api/my-list/') and path.endswith('/status'):
+            return True
+        if request.method == 'PUT' and path.startswith('/api/content/') and path.endswith('/review'):
+            return True
+        return request.method == 'POST' and path.startswith('/api/reviews/') and path.endswith('/reports')
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if self._expects_json(request):

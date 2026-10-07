@@ -27,7 +27,9 @@ query($page: Int!, $perPage: Int!) {
       episodes
       status
       format
+      season
       seasonYear
+      nextAiringEpisode { airingAt episode }
       countryOfOrigin
       siteUrl
       coverImage { extraLarge large }
@@ -108,13 +110,17 @@ def map_media(media: dict[str, Any]) -> dict[str, object]:
         'official_url': str(media.get('siteUrl')) if media.get('siteUrl') else None,
         'platform_links': links[:10],
         'source_url': str(media.get('siteUrl')) if media.get('siteUrl') else None,
+        'season': str(media.get('season') or '').lower() or None,
+        'season_year': media.get('seasonYear'),
+        'next_airing_at': datetime.fromtimestamp(int((media.get('nextAiringEpisode') or {}).get('airingAt')), tz=timezone.utc) if (media.get('nextAiringEpisode') or {}).get('airingAt') else None,
+        'next_episode_number': (media.get('nextAiringEpisode') or {}).get('episode'),
         'provider_updated_at': datetime.now(timezone.utc),
     }
 
 
 async def fetch_catalog(*, pages: int = 2, per_page: int = 25) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
-    async with httpx.AsyncClient(timeout=20.0, headers={'User-Agent': 'AniVideos/0.16'}) as client:
+    async with httpx.AsyncClient(timeout=20.0, headers={'User-Agent': 'AniVideos/0.17'}) as client:
         for page in range(1, max(1, pages) + 1):
             response = await client.post(ANILIST_API, json={'query': QUERY, 'variables': {'page': page, 'perPage': per_page}})
             response.raise_for_status()

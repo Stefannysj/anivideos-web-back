@@ -65,6 +65,10 @@ class ContentDetailResponse(ContentItemResponse):
     official_url: str | None = Field(default=None, serialization_alias='officialUrl')
     platform_links: list[PlatformLinkResponse] = Field(default_factory=list, serialization_alias='platformLinks')
     source_url: str | None = Field(default=None, serialization_alias='sourceUrl')
+    season: str | None = None
+    season_year: int | None = Field(default=None, serialization_alias='seasonYear')
+    next_airing_at: str | None = Field(default=None, serialization_alias='nextAiringAt')
+    next_episode_number: int | None = Field(default=None, serialization_alias='nextEpisodeNumber')
 
 
 class CatalogResponse(ApiModel):
@@ -240,3 +244,94 @@ class BannerCommentResponse(ApiModel):
 
 class BannerCommentListResponse(ApiModel):
     items: list[BannerCommentResponse]
+
+# v17: user library, reviews and calendar.
+ProgressStatus = Literal['watching', 'completed', 'planned']
+ReviewReportReason = Literal['spam', 'abuse', 'spoiler', 'other']
+SeasonName = Literal['winter', 'spring', 'summer', 'fall']
+
+
+class LibraryStatusRequest(ApiModel):
+    status: ProgressStatus | None = None
+
+
+class LibraryStateResponse(ApiModel):
+    content_id: str = Field(serialization_alias='contentId')
+    is_favorite: bool = Field(serialization_alias='isFavorite')
+    progress_status: ProgressStatus | None = Field(default=None, serialization_alias='progressStatus')
+
+
+class LibraryEntryResponse(ApiModel):
+    content: ContentItemResponse
+    is_favorite: bool = Field(serialization_alias='isFavorite')
+    progress_status: ProgressStatus | None = Field(default=None, serialization_alias='progressStatus')
+    updated_at: str = Field(serialization_alias='updatedAt')
+
+
+class LibraryResponse(ApiModel):
+    items: list[LibraryEntryResponse]
+
+
+class ReviewCreateRequest(ApiModel):
+    rating: int = Field(ge=1, le=10)
+    body: str = Field(default='', max_length=2000)
+
+    @field_validator('body')
+    @classmethod
+    def normalize_review_body(cls, value: str) -> str:
+        normalized = _plain_text(value, field_name='La reseña', allow_newlines=True)
+        if len(normalized) > 2000:
+            raise ValueError('La reseña admite hasta 2000 caracteres.')
+        return normalized
+
+
+class ReviewAuthorResponse(ApiModel):
+    username: str
+    display_name: str | None = Field(default=None, serialization_alias='displayName')
+
+
+class ReviewResponse(ApiModel):
+    id: int
+    content_id: str = Field(serialization_alias='contentId')
+    rating: int
+    body: str
+    author: ReviewAuthorResponse
+    created_at: str = Field(serialization_alias='createdAt')
+    updated_at: str = Field(serialization_alias='updatedAt')
+    is_owner: bool = Field(serialization_alias='isOwner')
+
+
+class ReviewListResponse(ApiModel):
+    items: list[ReviewResponse]
+    count: int
+    average_rating: float = Field(serialization_alias='averageRating')
+
+
+class ReviewReportRequest(ApiModel):
+    reason: ReviewReportReason
+    detail: str | None = Field(default=None, max_length=500)
+
+    @field_validator('detail')
+    @classmethod
+    def normalize_report_detail(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = _plain_text(value, field_name='El detalle del reporte', allow_newlines=True)
+        return normalized or None
+
+
+class CalendarEntryResponse(ApiModel):
+    content: ContentItemResponse
+    airing_at: str = Field(serialization_alias='airingAt')
+    episode_number: int | None = Field(default=None, serialization_alias='episodeNumber')
+
+
+class WeeklyCalendarResponse(ApiModel):
+    week_start: str = Field(serialization_alias='weekStart')
+    items: list[CalendarEntryResponse]
+
+
+class SeasonCalendarResponse(ApiModel):
+    season: SeasonName
+    year: int
+    items: list[ContentItemResponse]

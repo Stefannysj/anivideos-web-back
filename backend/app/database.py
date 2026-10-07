@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 import json
 from typing import Iterator, Sequence
@@ -90,6 +90,10 @@ def _content_projection(prefix: str = 'c', *, include_detail: bool = True) -> st
             f'{prefix}.official_url',
             f'{prefix}.platform_links',
             f'{prefix}.source_url',
+            f'{prefix}.season',
+            f'{prefix}.season_year',
+            f'{prefix}.next_airing_at',
+            f'{prefix}.next_episode_number',
         ])
     return ',\n        '.join(fields)
 
@@ -103,6 +107,8 @@ def _normalize_content_row(row: dict[str, object]) -> dict[str, object]:
     if 'platform_links' in result:
         result['platform_links'] = list(result.get('platform_links') or [])
     result['score'] = float(result.get('score') or 0)
+    if 'next_airing_at' in result and result.get('next_airing_at') is not None and hasattr(result['next_airing_at'], 'isoformat'):
+        result['next_airing_at'] = result['next_airing_at'].isoformat()
     return result
 
 
@@ -126,8 +132,11 @@ def list_content(
         params.append(category)
     if search:
         pattern = f"%{_escape_like(search)}%"
-        filters.append("(c.title ILIKE %s ESCAPE '\\\\' OR COALESCE(c.original_title, '') ILIKE %s ESCAPE '\\\\')")
-        params.extend([pattern, pattern])
+        filters.append(
+            "(c.title ILIKE %s ESCAPE '\\' OR COALESCE(c.original_title, '') ILIKE %s ESCAPE '\\' "
+            "OR similarity(c.title, %s) >= 0.22 OR similarity(COALESCE(c.original_title, ''), %s) >= 0.22)"
+        )
+        params.extend([pattern, pattern, search, search])
     if genre:
         filters.append('c.genres @> %s::jsonb')
         params.append(json.dumps([genre]))
@@ -150,6 +159,10 @@ def list_content(
         'year-desc': 'c.release_year DESC NULLS LAST, c.score DESC',
         'score-desc': 'c.score DESC, c.title ASC',
     }.get(sort, 'c.score DESC, c.release_year DESC NULLS LAST, c.title ASC')
+    order_params: list[object] = []
+    if search and sort == 'featured':
+        order_by = "GREATEST(similarity(c.title, %s), similarity(COALESCE(c.original_title, ''), %s)) DESC, c.score DESC, c.title ASC"
+        order_params.extend([search, search])
 
     where_sql = f"WHERE {' AND '.join(filters)}" if filters else ''
     query = f"""
@@ -159,6 +172,7 @@ def list_content(
         ORDER BY {order_by}
         LIMIT %s
     """
+    params.extend(order_params)
     params.append(max(1, min(limit, 200)))
     with connection() as conn:
         with conn.cursor() as cur:
@@ -351,38 +365,149 @@ def update_user_profile(
             return dict(cur.fetchone())
 
 
-def list_favorites(user_id: int) -> list[dict[str, object]]:
+def list_library(user_id: int) -> list[dict[str, object]]:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT {_content_projection('c', include_detail=False)}
-                FROM favorites f
-                JOIN content_items c ON c.id = f.content_id
-                WHERE f.user_id = %s
-                ORDER BY f.created_at DESC
+                SELECT {_content_projection('c', include_detail=False)},
+                       ul.is_favorite, ul.progress_status, ul.updated_at AS library_updated_at
+                FROM user_library ul
+                JOIN content_items c ON c.id = ul.content_id
+                WHERE ul.user_id = %s
+                ORDER BY ul.updated_at DESC, c.title ASC
                 """,
                 (user_id,),
             )
-            return [_normalize_content_row(row) for row in cur.fetchall()]
+            result = []
+            for row in cur.fetchall():
+                item = _normalize_content_row(row)
+                result.append({
+                    'content': {key: value for key, value in item.items() if key not in {'is_favorite', 'progress_status', 'library_updated_at'}},
+                    'is_favorite': bool(row['is_favorite']),
+                    'progress_status': row['progress_status'],
+                    'updated_at': row['library_updated_at'].isoformat() if hasattr(row['library_updated_at'], 'isoformat') else str(row['library_updated_at']),
+                })
+            return result
 
 
-def add_favorite(user_id: int, content_id: str) -> bool:
+def set_library_state(
+    user_id: int,
+    content_id: str,
+    *,
+    is_favorite: bool | None = None,
+    progress_status: str | None | object = ...,
+) -> dict[str, object] | None:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT 1 FROM content_items WHERE id = %s', (content_id,))
             if cur.fetchone() is None:
-                return False
+                return None
             cur.execute(
-                'INSERT INTO favorites (user_id, content_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                'SELECT is_favorite, progress_status FROM user_library WHERE user_id = %s AND content_id = %s',
                 (user_id, content_id),
             )
-            return True
+            current = cur.fetchone()
+            next_favorite = bool(current['is_favorite']) if current else False
+            next_status = current['progress_status'] if current else None
+            if is_favorite is not None:
+                next_favorite = is_favorite
+            if progress_status is not ...:
+                next_status = progress_status
+            if not next_favorite and next_status is None:
+                cur.execute('DELETE FROM user_library WHERE user_id = %s AND content_id = %s', (user_id, content_id))
+                return {'content_id': content_id, 'is_favorite': False, 'progress_status': None}
+            cur.execute(
+                """
+                INSERT INTO user_library (user_id, content_id, is_favorite, progress_status, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id, content_id) DO UPDATE SET
+                    is_favorite = EXCLUDED.is_favorite,
+                    progress_status = EXCLUDED.progress_status,
+                    updated_at = now()
+                RETURNING is_favorite, progress_status
+                """,
+                (user_id, content_id, next_favorite, next_status),
+            )
+            row = cur.fetchone()
+            return {'content_id': content_id, 'is_favorite': bool(row['is_favorite']), 'progress_status': row['progress_status']}
+
+
+def list_favorites(user_id: int) -> list[dict[str, object]]:
+    return [entry['content'] for entry in list_library(user_id) if entry['is_favorite']]
+
+
+def add_favorite(user_id: int, content_id: str) -> bool:
+    return set_library_state(user_id, content_id, is_favorite=True) is not None
 
 
 def remove_favorite(user_id: int, content_id: str) -> None:
+    set_library_state(user_id, content_id, is_favorite=False)
+
+
+def search_suggestions(query: str, limit: int = 8) -> list[dict[str, object]]:
+    normalized = query.strip()
+    if len(normalized) < 2:
+        return []
+    pattern = f"%{_escape_like(normalized)}%"
     with connection() as conn:
-        conn.execute('DELETE FROM favorites WHERE user_id = %s AND content_id = %s', (user_id, content_id))
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_content_projection('c', include_detail=False)},
+                       GREATEST(similarity(c.title, %s), similarity(COALESCE(c.original_title, ''), %s)) AS relevance
+                FROM content_items c
+                WHERE c.title ILIKE %s ESCAPE '\\'
+                   OR COALESCE(c.original_title, '') ILIKE %s ESCAPE '\\'
+                   OR similarity(c.title, %s) >= 0.18
+                   OR similarity(COALESCE(c.original_title, ''), %s) >= 0.18
+                ORDER BY relevance DESC, c.score DESC, c.title ASC
+                LIMIT %s
+                """,
+                (normalized, normalized, pattern, pattern, normalized, normalized, max(1, min(limit, 12))),
+            )
+            result = []
+            for row in cur.fetchall():
+                item = _normalize_content_row(row)
+                item.pop('relevance', None)
+                result.append(item)
+            return result
+
+
+def list_recommendations(user_id: int, limit: int = 12) -> list[dict[str, object]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH preferred_genres AS (
+                    SELECT genre.value AS genre, COUNT(*)::integer AS weight
+                    FROM user_library ul
+                    JOIN content_items owned ON owned.id = ul.content_id
+                    CROSS JOIN LATERAL jsonb_array_elements_text(owned.genres) AS genre(value)
+                    WHERE ul.user_id = %s AND ul.is_favorite = TRUE
+                    GROUP BY genre.value
+                ), ranked AS (
+                    SELECT c.id, COALESCE(SUM(pg.weight), 0)::integer AS affinity
+                    FROM content_items c
+                    LEFT JOIN LATERAL jsonb_array_elements_text(c.genres) AS candidate_genre(value) ON TRUE
+                    LEFT JOIN preferred_genres pg ON pg.genre = candidate_genre.value
+                    WHERE NOT EXISTS (SELECT 1 FROM user_library ul2 WHERE ul2.user_id = %s AND ul2.content_id = c.id)
+                    GROUP BY c.id
+                )
+                SELECT {_content_projection('c', include_detail=False)}, ranked.affinity
+                FROM ranked
+                JOIN content_items c ON c.id = ranked.id
+                ORDER BY ranked.affinity DESC, c.score DESC, c.release_year DESC NULLS LAST, c.title ASC
+                LIMIT %s
+                """,
+                (user_id, user_id, max(1, min(limit, 24))),
+            )
+            result = []
+            for row in cur.fetchall():
+                item = _normalize_content_row(row)
+                item.pop('affinity', None)
+                result.append(item)
+            return result
 
 
 def banner_exists(banner_id: str) -> bool:
@@ -451,6 +576,134 @@ def delete_banner_comment(banner_id: str, comment_id: int, user_id: int) -> bool
             return cur.rowcount > 0
 
 
+def _review_row(row: dict[str, object], viewer_id: int | None) -> dict[str, object]:
+    return {
+        'id': int(row['id']),
+        'content_id': str(row['content_id']),
+        'rating': int(row['rating']),
+        'body': str(row['body'] or ''),
+        'author': {
+            'username': str(row['username']),
+            'display_name': str(row['display_name']) if row.get('display_name') else None,
+        },
+        'created_at': row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']),
+        'updated_at': row['updated_at'].isoformat() if hasattr(row['updated_at'], 'isoformat') else str(row['updated_at']),
+        'is_owner': viewer_id is not None and int(row['user_id']) == viewer_id,
+    }
+
+
+def list_reviews(content_id: str, viewer_id: int | None) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1 FROM content_items WHERE id = %s', (content_id,))
+            if cur.fetchone() is None:
+                return None
+            cur.execute(
+                """
+                SELECT r.*, u.username, u.display_name
+                FROM reviews r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.content_id = %s
+                ORDER BY r.updated_at DESC, r.id DESC
+                """,
+                (content_id,),
+            )
+            items = [_review_row(row, viewer_id) for row in cur.fetchall()]
+            cur.execute('SELECT COUNT(*) AS count, AVG(rating)::float AS average FROM reviews WHERE content_id = %s', (content_id,))
+            summary = cur.fetchone()
+            return {'items': items, 'count': int(summary['count']), 'average_rating': round(float(summary['average'] or 0), 1)}
+
+
+def upsert_review(user_id: int, content_id: str, rating: int, body: str) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1 FROM content_items WHERE id = %s', (content_id,))
+            if cur.fetchone() is None:
+                return None
+            cur.execute(
+                """
+                INSERT INTO reviews (user_id, content_id, rating, body, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id, content_id) DO UPDATE SET
+                    rating = EXCLUDED.rating, body = EXCLUDED.body, updated_at = now()
+                RETURNING *
+                """,
+                (user_id, content_id, rating, body),
+            )
+            row = dict(cur.fetchone())
+            cur.execute('SELECT username, display_name FROM users WHERE id = %s', (user_id,))
+            row.update(cur.fetchone())
+            return _review_row(row, user_id)
+
+
+def delete_review(user_id: int, content_id: str) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM reviews WHERE user_id = %s AND content_id = %s', (user_id, content_id))
+            return cur.rowcount > 0
+
+
+def report_review(review_id: int, reporter_user_id: int, reason: str, detail: str | None) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT user_id FROM reviews WHERE id = %s', (review_id,))
+            row = cur.fetchone()
+            if row is None or int(row['user_id']) == reporter_user_id:
+                return False
+            cur.execute(
+                """
+                INSERT INTO review_reports (review_id, reporter_user_id, reason, detail)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (review_id, reporter_user_id) DO UPDATE SET
+                    reason = EXCLUDED.reason, detail = EXCLUDED.detail, created_at = now()
+                """,
+                (review_id, reporter_user_id, reason, detail),
+            )
+            return True
+
+
+def list_weekly_calendar(week_start: date) -> list[dict[str, object]]:
+    start = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_content_projection('c', include_detail=False)}, c.next_airing_at, c.next_episode_number
+                FROM content_items c
+                WHERE c.next_airing_at >= %s AND c.next_airing_at < %s
+                ORDER BY c.next_airing_at ASC, c.title ASC
+                """,
+                (start, end),
+            )
+            result = []
+            for row in cur.fetchall():
+                item = _normalize_content_row(row)
+                result.append({
+                    'content': {key: value for key, value in item.items() if key not in {'next_airing_at', 'next_episode_number'}},
+                    'airing_at': row['next_airing_at'].isoformat(),
+                    'episode_number': row['next_episode_number'],
+                })
+            return result
+
+
+def list_season_calendar(season: str, year: int, limit: int = 100) -> list[dict[str, object]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_content_projection('c', include_detail=False)}
+                FROM content_items c
+                WHERE c.season = %s AND c.season_year = %s
+                ORDER BY c.score DESC, c.title ASC
+                LIMIT %s
+                """,
+                (season, year, max(1, min(limit, 200))),
+            )
+            return [_normalize_content_row(row) for row in cur.fetchall()]
+
+
+
 def upsert_catalog_items(items: Sequence[dict[str, object]]) -> int:
     if not items:
         return 0
@@ -459,13 +712,13 @@ def upsert_catalog_items(items: Sequence[dict[str, object]]) -> int:
             id, source, external_id, category, title, original_title, synopsis, genres,
             cover_url, backdrop_url, studio, episodes, score, release_year, maturity,
             format, status, origin, trailer_youtube_id, official_url, platform_links,
-            source_url, provider_updated_at, updated_at
+            source_url, provider_updated_at, season, season_year, next_airing_at, next_episode_number, updated_at
         ) VALUES (
             %(id)s, %(source)s, %(external_id)s, %(category)s, %(title)s, %(original_title)s,
             %(synopsis)s, %(genres)s::jsonb, %(cover_url)s, %(backdrop_url)s, %(studio)s,
             %(episodes)s, %(score)s, %(release_year)s, %(maturity)s, %(format)s, %(status)s,
             %(origin)s, %(trailer_youtube_id)s, %(official_url)s, %(platform_links)s::jsonb,
-            %(source_url)s, %(provider_updated_at)s, now()
+            %(source_url)s, %(provider_updated_at)s, %(season)s, %(season_year)s, %(next_airing_at)s, %(next_episode_number)s, now()
         )
         ON CONFLICT (source, external_id) DO UPDATE SET
             id = EXCLUDED.id,
@@ -489,6 +742,10 @@ def upsert_catalog_items(items: Sequence[dict[str, object]]) -> int:
             platform_links = EXCLUDED.platform_links,
             source_url = EXCLUDED.source_url,
             provider_updated_at = EXCLUDED.provider_updated_at,
+            season = EXCLUDED.season,
+            season_year = EXCLUDED.season_year,
+            next_airing_at = EXCLUDED.next_airing_at,
+            next_episode_number = EXCLUDED.next_episode_number,
             updated_at = now()
     """
     normalized = []
@@ -496,6 +753,10 @@ def upsert_catalog_items(items: Sequence[dict[str, object]]) -> int:
         row = dict(item)
         row['genres'] = json.dumps(row.get('genres') or [])
         row['platform_links'] = json.dumps(row.get('platform_links') or [])
+        row.setdefault('season', None)
+        row.setdefault('season_year', row.get('release_year'))
+        row.setdefault('next_airing_at', None)
+        row.setdefault('next_episode_number', None)
         normalized.append(row)
     with connection() as conn:
         with conn.cursor() as cur:

@@ -18,6 +18,33 @@ def _youtube_trailer(videos: list[dict[str, Any]]) -> str | None:
     return str(trailer['key']) if trailer else None
 
 
+
+
+def _season_for_date(value: str | None) -> str | None:
+    if not isinstance(value, str) or len(value) < 7:
+        return None
+    try:
+        month = int(value[5:7])
+    except ValueError:
+        return None
+    if month in {12, 1, 2}:
+        return 'winter'
+    if month in {3, 4, 5}:
+        return 'spring'
+    if month in {6, 7, 8}:
+        return 'summer'
+    return 'fall'
+
+
+def _date_at_noon_utc(value: str | None) -> datetime | None:
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        parsed = datetime.strptime(value[:10], '%Y-%m-%d')
+    except ValueError:
+        return None
+    return parsed.replace(hour=12, tzinfo=timezone.utc)
+
 def _status(value: str | None) -> str:
     normalized = (value or '').strip().lower()
     if normalized in {'ended', 'released'}:
@@ -63,6 +90,8 @@ def map_details(details: dict[str, Any], *, category: str, media_type: str, regi
     poster = details.get('poster_path')
     backdrop = details.get('backdrop_path')
     source_path = f'/{media_type}/{media_id}'
+    next_episode = details.get('next_episode_to_air') or {}
+    next_date = next_episode.get('air_date') if is_tv else first_date
     return {
         'id': f'tmdb-{media_type}-{media_id}',
         'source': 'tmdb',
@@ -86,6 +115,10 @@ def map_details(details: dict[str, Any], *, category: str, media_type: str, regi
         'official_url': str(details.get('homepage')) if str(details.get('homepage') or '').startswith('https://') else None,
         'platform_links': _provider_links(details, region, media_type, media_id),
         'source_url': f'{TMDB_WEB}{source_path}',
+        'season': _season_for_date(first_date),
+        'season_year': year,
+        'next_airing_at': _date_at_noon_utc(next_date),
+        'next_episode_number': next_episode.get('episode_number') if is_tv else None,
         'provider_updated_at': datetime.now(timezone.utc),
     }
 
@@ -103,7 +136,7 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict[str, object] |
 async def fetch_catalog(token: str, *, region: str = 'PE', pages: int = 1) -> list[dict[str, object]]:
     if not token:
         raise RuntimeError('TMDB_READ_TOKEN is required for TMDB synchronization.')
-    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': 'AniVideos/0.16'}
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': 'AniVideos/0.17'}
     results: list[dict[str, object]] = []
     discoveries = [
         ('k-drama', 'tv', {'with_original_language': 'ko'}),
