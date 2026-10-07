@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 _USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]{3,30}$')
 _BIDI_CONTROL = frozenset('\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+ContentCategory = Literal['anime', 'k-drama', 'j-drama', 'donghua', 'movie', 'ova']
 
 
 def _plain_text(value: str, *, field_name: str, allow_newlines: bool) -> str:
@@ -16,15 +17,12 @@ def _plain_text(value: str, *, field_name: str, allow_newlines: bool) -> str:
     for character in normalized:
         if character in _BIDI_CONTROL:
             raise ValueError(f'{field_name} contiene caracteres de control no permitidos.')
-        if unicodedata.category(character) == 'Cc' and not (
-            allow_newlines and character in {'\n', '\t'}
-        ):
+        if unicodedata.category(character) == 'Cc' and not (allow_newlines and character in {'\n', '\t'}):
             raise ValueError(f'{field_name} contiene caracteres de control no permitidos.')
     return normalized
 
 
 class ApiModel(BaseModel):
-    # Unknown input fields are rejected to avoid silent mass-assignment style mistakes.
     model_config = ConfigDict(populate_by_name=True, extra='forbid')
 
 
@@ -33,23 +31,40 @@ class HealthResponse(ApiModel):
     service: Literal['anivideos-api']
 
 
+class PlatformLinkResponse(ApiModel):
+    name: str
+    url: str
+    attribution: str | None = None
+
+
 class ContentItemResponse(ApiModel):
     id: str
+    source: Literal['anilist', 'tmdb']
+    source_attribution: str = Field(serialization_alias='sourceAttribution')
+    external_id: str = Field(serialization_alias='externalId')
     title: str
-    category: Literal['anime', 'k-drama', 'series', 'movie']
+    original_title: str | None = Field(default=None, serialization_alias='originalTitle')
+    category: ContentCategory
     category_label: str = Field(serialization_alias='categoryLabel')
-    year: int
+    year: int | None
     score: float
     maturity: str
     format: str
     genres: list[str]
     artwork: str
+    studio: str | None = None
+    episodes: int | None = None
+    status: str
 
 
 class ContentDetailResponse(ContentItemResponse):
     synopsis: str
     origin: str
-    status: str
+    backdrop_url: str | None = Field(default=None, serialization_alias='backdropUrl')
+    trailer_youtube_id: str | None = Field(default=None, serialization_alias='trailerYoutubeId')
+    official_url: str | None = Field(default=None, serialization_alias='officialUrl')
+    platform_links: list[PlatformLinkResponse] = Field(default_factory=list, serialization_alias='platformLinks')
+    source_url: str | None = Field(default=None, serialization_alias='sourceUrl')
 
 
 class CatalogResponse(ApiModel):
@@ -58,7 +73,10 @@ class CatalogResponse(ApiModel):
 
 class BannerResponse(ApiModel):
     id: str
-    category: Literal['Anime', 'K-Drama', 'Serie', 'Película']
+    content_id: str = Field(serialization_alias='contentId')
+    source: Literal['anilist', 'tmdb']
+    source_attribution: str = Field(serialization_alias='sourceAttribution')
+    category: str
     eyebrow: str
     title: str
     synopsis: str
@@ -159,11 +177,7 @@ class ProfileUpdateRequest(ApiModel):
         if value is None:
             return None
         normalized = ' '.join(_plain_text(value, field_name='El nombre visible', allow_newlines=False).split())
-        if not normalized:
-            return None
-        if len(normalized) > 60:
-            raise ValueError('El nombre visible admite hasta 60 caracteres.')
-        return normalized
+        return normalized or None
 
     @field_validator('bio')
     @classmethod
@@ -171,11 +185,7 @@ class ProfileUpdateRequest(ApiModel):
         if value is None:
             return None
         normalized = _plain_text(value, field_name='La biografía', allow_newlines=True)
-        if not normalized:
-            return None
-        if len(normalized) > 280:
-            raise ValueError('La biografía admite hasta 280 caracteres.')
-        return normalized
+        return normalized or None
 
 
 class UserResponse(ApiModel):
@@ -211,8 +221,6 @@ class BannerCommentCreateRequest(ApiModel):
         normalized = _plain_text(value, field_name='El comentario', allow_newlines=True)
         if not normalized:
             raise ValueError('El comentario no puede estar vacío.')
-        if len(normalized) > 1000:
-            raise ValueError('El comentario admite hasta 1000 caracteres.')
         return normalized
 
 

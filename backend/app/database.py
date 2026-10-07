@@ -4,352 +4,329 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 import json
-from pathlib import Path
-import sqlite3
-from typing import Iterator
+from typing import Iterator, Sequence
 
-from app.config import BASE_DIR, settings
+import psycopg
+from psycopg.rows import dict_row
 
-SCHEMA_PATH = BASE_DIR / 'sql' / 'schema.sql'
-SEED_PATH = BASE_DIR / 'sql' / 'seed.sql'
+from app.config import settings
 
-
-def _path(database_path: Path | None = None) -> Path:
-    return (database_path or settings.database_path).resolve()
+CATEGORY_LABELS = {
+    'anime': 'Anime',
+    'k-drama': 'K-Drama',
+    'j-drama': 'J-Drama',
+    'donghua': 'Donghua',
+    'movie': 'Película',
+    'ova': 'OVA',
+}
+SECTION_HREFS = {
+    'anime': '#anime',
+    'k-drama': '#k-dramas',
+    'j-drama': '#j-dramas',
+    'donghua': '#donghua',
+    'movie': '#peliculas',
+    'ova': '#ovas',
+}
 
 
 @contextmanager
-def connection(database_path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    path = _path(database_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys = ON')
-    conn.execute('PRAGMA trusted_schema = OFF')
-    conn.execute('PRAGMA secure_delete = ON')
-    conn.execute('PRAGMA recursive_triggers = OFF')
-    conn.execute('PRAGMA busy_timeout = 5000')
-    conn.execute('PRAGMA temp_store = MEMORY')
-    conn.execute('PRAGMA cache_size = -8192')
-    try:
+def connection(database_url: str | None = None) -> Iterator[psycopg.Connection]:
+    with psycopg.connect(database_url or settings.database_url, row_factory=dict_row) as conn:
         yield conn
-    finally:
-        conn.close()
 
 
-def _ensure_user_profile_columns(conn: sqlite3.Connection) -> None:
-    columns = {str(row['name']) for row in conn.execute('PRAGMA table_info(users)').fetchall()}
-    if 'display_name' not in columns:
-        conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT CHECK(display_name IS NULL OR length(trim(display_name)) BETWEEN 1 AND 60)")
-    if 'bio' not in columns:
-        conn.execute("ALTER TABLE users ADD COLUMN bio TEXT CHECK(bio IS NULL OR length(bio) <= 280)")
+def initialize_database() -> None:
+    """Validate PostgreSQL availability and require Alembic migrations before startup."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.content_items') AS table_name")
+            row = cur.fetchone()
+            if not row or row['table_name'] is None:
+                raise RuntimeError('Database schema is missing. Run: alembic upgrade head')
 
 
-
-def _ensure_content_detail_columns(conn: sqlite3.Connection) -> None:
-    columns = {str(row['name']) for row in conn.execute('PRAGMA table_info(content_items)').fetchall()}
-    if 'synopsis' not in columns:
-        conn.execute("ALTER TABLE content_items ADD COLUMN synopsis TEXT NOT NULL DEFAULT ''")
-    if 'origin' not in columns:
-        conn.execute("ALTER TABLE content_items ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
-    if 'status' not in columns:
-        conn.execute("ALTER TABLE content_items ADD COLUMN status TEXT NOT NULL DEFAULT ''")
-
-
-def initialize_database(database_path: Path | None = None) -> None:
-    path = _path(database_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    schema = SCHEMA_PATH.read_text(encoding='utf-8')
-    seed = SEED_PATH.read_text(encoding='utf-8')
-    with connection(path) as conn:
-        conn.execute('PRAGMA journal_mode = WAL')
-        conn.execute('PRAGMA synchronous = NORMAL')
-        conn.executescript(schema)
-        _ensure_user_profile_columns(conn)
-        _ensure_content_detail_columns(conn)
-        conn.executescript(seed)
-        conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (int(datetime.now(timezone.utc).timestamp()),))
-        conn.execute('PRAGMA optimize')
-        conn.commit()
-    clear_public_query_caches()
-
-
-def database_is_healthy(database_path: Path | None = None) -> bool:
+def database_is_healthy() -> bool:
     try:
-        with connection(database_path) as conn:
-            result = conn.execute('SELECT 1 AS ok').fetchone()
-        return bool(result and result['ok'] == 1)
-    except sqlite3.Error:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT 1 AS ok')
+                return bool(cur.fetchone()['ok'])
+    except psycopg.Error:
         return False
 
 
 def _escape_like(value: str) -> str:
-    """Escapes LIKE wildcards so user input is treated as literal text."""
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
-@lru_cache(maxsize=256)
+def _content_projection(prefix: str = 'c', *, include_detail: bool = True) -> str:
+    # List endpoints intentionally select only ContentItemResponse fields.
+    # Detail/banner endpoints opt into the larger projection. This keeps payloads
+    # smaller and, importantly, avoids passing detail-only keys into Pydantic
+    # models configured with extra="forbid".
+    fields = [
+        f'{prefix}.id',
+        f'{prefix}.source',
+        f'{prefix}.external_id',
+        f'{prefix}.title',
+        f'{prefix}.original_title',
+        f'{prefix}.category',
+        f'{prefix}.release_year AS year',
+        f'{prefix}.score',
+        f'{prefix}.maturity',
+        f'{prefix}.format',
+        f'{prefix}.genres',
+        f'{prefix}.cover_url AS artwork',
+        f'{prefix}.studio',
+        f'{prefix}.episodes',
+        f'{prefix}.status',
+    ]
+    if include_detail:
+        fields.extend([
+            f'{prefix}.backdrop_url',
+            f'{prefix}.synopsis',
+            f'{prefix}.origin',
+            f'{prefix}.trailer_youtube_id',
+            f'{prefix}.official_url',
+            f'{prefix}.platform_links',
+            f'{prefix}.source_url',
+        ])
+    return ',\n        '.join(fields)
+
+
+def _normalize_content_row(row: dict[str, object]) -> dict[str, object]:
+    result = dict(row)
+    category = str(result['category'])
+    result['category_label'] = CATEGORY_LABELS.get(category, category)
+    result['source_attribution'] = 'AniList' if result['source'] == 'anilist' else 'TMDB'
+    result['genres'] = list(result.get('genres') or [])
+    if 'platform_links' in result:
+        result['platform_links'] = list(result.get('platform_links') or [])
+    result['score'] = float(result.get('score') or 0)
+    return result
+
+
 def list_content(
     category: str | None = None,
-    database_path: Path | None = None,
     *,
     search: str | None = None,
     genre: str | None = None,
     year: int | None = None,
     min_score: float | None = None,
+    status: str | None = None,
+    format: str | None = None,
     sort: str = 'featured',
+    limit: int = 120,
 ) -> list[dict[str, object]]:
-    query = """
-        SELECT id, title, category, category_label, release_year, score,
-               maturity, format, genres_json, artwork, display_order
-          FROM content_items
-    """
-    conditions: list[str] = []
+    filters: list[str] = []
     params: list[object] = []
 
-    if category is not None:
-        conditions.append('category = ?')
+    if category:
+        filters.append('c.category = %s')
         params.append(category)
-
-    if search is not None and search.strip():
-        pattern = f"%{_escape_like(search.strip())}%"
-        conditions.append("(title LIKE ? ESCAPE '\\' COLLATE NOCASE OR genres_json LIKE ? ESCAPE '\\' COLLATE NOCASE)")
-        params.extend((pattern, pattern))
-
-    if genre is not None and genre.strip():
-        genre_pattern = f'%"{_escape_like(genre.strip())}"%'
-        conditions.append("genres_json LIKE ? ESCAPE '\\' COLLATE NOCASE")
-        params.append(genre_pattern)
-
+    if search:
+        pattern = f"%{_escape_like(search)}%"
+        filters.append("(c.title ILIKE %s ESCAPE '\\\\' OR COALESCE(c.original_title, '') ILIKE %s ESCAPE '\\\\')")
+        params.extend([pattern, pattern])
+    if genre:
+        filters.append('c.genres @> %s::jsonb')
+        params.append(json.dumps([genre]))
     if year is not None:
-        conditions.append('release_year = ?')
+        filters.append('c.release_year = %s')
         params.append(year)
-
     if min_score is not None:
-        conditions.append('score >= ?')
+        filters.append('c.score >= %s')
         params.append(min_score)
-
-    if conditions:
-        query += ' WHERE ' + ' AND '.join(conditions)
+    if status:
+        filters.append('c.status = %s')
+        params.append(status)
+    if format:
+        filters.append('c.format = %s')
+        params.append(format)
 
     order_by = {
-        'featured': 'display_order ASC',
-        'title-asc': 'title COLLATE NOCASE ASC, display_order ASC',
-        'year-desc': 'release_year DESC, display_order ASC',
-        'score-desc': 'score DESC, display_order ASC',
-    }.get(sort, 'display_order ASC')
-    query += f' ORDER BY {order_by}'
+        'featured': 'c.score DESC, c.release_year DESC NULLS LAST, c.title ASC',
+        'title-asc': 'c.title ASC',
+        'year-desc': 'c.release_year DESC NULLS LAST, c.score DESC',
+        'score-desc': 'c.score DESC, c.title ASC',
+    }.get(sort, 'c.score DESC, c.release_year DESC NULLS LAST, c.title ASC')
 
-    with connection(database_path) as conn:
-        rows = conn.execute(query, tuple(params)).fetchall()
-
-    return [
-        {
-            'id': row['id'],
-            'title': row['title'],
-            'category': row['category'],
-            'category_label': row['category_label'],
-            'year': row['release_year'],
-            'score': row['score'],
-            'maturity': row['maturity'],
-            'format': row['format'],
-            'genres': json.loads(row['genres_json']),
-            'artwork': row['artwork'],
-        }
-        for row in rows
-    ]
-
-
-@lru_cache(maxsize=128)
-def get_content_by_id(content_id: str, database_path: Path | None = None) -> dict[str, object] | None:
-    query = """
-        SELECT id, title, category, category_label, release_year, score,
-               maturity, format, genres_json, artwork, synopsis, origin, status
-          FROM content_items
-         WHERE id = ?
-         LIMIT 1
+    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ''
+    query = f"""
+        SELECT {_content_projection('c', include_detail=False)}
+        FROM content_items c
+        {where_sql}
+        ORDER BY {order_by}
+        LIMIT %s
     """
-    with connection(database_path) as conn:
-        row = conn.execute(query, (content_id,)).fetchone()
-    if row is None:
-        return None
-    return {
-        'id': row['id'],
-        'title': row['title'],
-        'category': row['category'],
-        'category_label': row['category_label'],
-        'year': row['release_year'],
-        'score': row['score'],
-        'maturity': row['maturity'],
-        'format': row['format'],
-        'genres': json.loads(row['genres_json']),
-        'artwork': row['artwork'],
-        'synopsis': row['synopsis'],
-        'origin': row['origin'],
-        'status': row['status'],
-    }
+    params.append(max(1, min(limit, 200)))
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return [_normalize_content_row(row) for row in cur.fetchall()]
 
 
-@lru_cache(maxsize=16)
-def list_banners(database_path: Path | None = None) -> list[dict[str, object]]:
-    query = '''
-        SELECT id, category, eyebrow, title, synopsis, release_year, age_rating,
-               format, genres_json, artwork, section_href
-          FROM featured_banners
-         ORDER BY display_order ASC
-    '''
-    with connection(database_path) as conn:
-        rows = conn.execute(query).fetchall()
+@lru_cache(maxsize=512)
+def get_content_by_id(content_id: str) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {_content_projection('c')} FROM content_items c WHERE c.id = %s",
+                (content_id,),
+            )
+            row = cur.fetchone()
+            return _normalize_content_row(row) if row else None
 
-    return [
-        {
-            'id': row['id'],
-            'category': 'Película' if row['category'] == 'Pelicula' else row['category'],
-            'eyebrow': row['eyebrow'],
-            'title': row['title'],
-            'synopsis': row['synopsis'],
-            'year': row['release_year'],
-            'age_rating': row['age_rating'],
-            'format': row['format'],
-            'genres': json.loads(row['genres_json']),
-            'artwork': row['artwork'],
-            'section_href': row['section_href'],
-        }
-        for row in rows
-    ]
+
+def list_banners() -> list[dict[str, object]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT b.id AS banner_id, b.eyebrow, b.display_order, {_content_projection('c')}
+                FROM featured_banners b
+                JOIN content_items c ON c.id = b.content_id
+                WHERE b.is_active = TRUE
+                ORDER BY b.display_order ASC, c.score DESC
+                """
+            )
+            result = []
+            for raw in cur.fetchall():
+                item = _normalize_content_row(raw)
+                category = str(item['category'])
+                result.append({
+                    'id': str(raw['banner_id']),
+                    'content_id': str(item['id']),
+                    'category': CATEGORY_LABELS.get(category, category),
+                    'eyebrow': str(raw['eyebrow']),
+                    'title': str(item['title']),
+                    'synopsis': str(item['synopsis']),
+                    'year': int(item['year']) if item['year'] is not None else datetime.now(timezone.utc).year,
+                    'age_rating': str(item['maturity']),
+                    'format': str(item['format']),
+                    'genres': item['genres'],
+                    'artwork': str(item.get('backdrop_url') or item['artwork']),
+                    'section_href': SECTION_HREFS.get(category, '#catalogo'),
+                    'source': str(item['source']),
+                    'source_attribution': str(item['source_attribution']),
+                })
+            return result
 
 
 def clear_public_query_caches() -> None:
-    """Invalidates immutable public catalog caches after startup migrations/seeding."""
-    list_content.cache_clear()
     get_content_by_id.cache_clear()
-    list_banners.cache_clear()
 
 
-def create_user(
-    username: str,
-    email: str,
-    password_hash: str,
-    database_path: Path | None = None,
-) -> dict[str, object]:
-    with connection(database_path) as conn:
-        cursor = conn.execute(
-            'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)',
-            (username, email, password_hash),
-        )
-        conn.commit()
-        user_id = int(cursor.lastrowid)
-    user = get_user_by_id(user_id, database_path)
-    if user is None:
-        raise RuntimeError('User creation failed')
-    return user
+def create_user(username: str, email: str, password_hash: str) -> dict[str, object]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (username, email, password_hash)
+                VALUES (%s, %s, %s)
+                RETURNING *
+                """,
+                (username, email, password_hash),
+            )
+            return dict(cur.fetchone())
 
 
-def get_user_by_id(user_id: int, database_path: Path | None = None) -> dict[str, object] | None:
-    with connection(database_path) as conn:
-        row = conn.execute(
-            '''SELECT id, username, email, password_hash, avatar_url, display_name, bio, is_active, created_at, updated_at
-                 FROM users
-                WHERE id = ?''',
-            (user_id,),
-        ).fetchone()
-    return _user_row(row)
+def get_user_by_id(user_id: int) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
-def get_user_by_identifier(identifier: str, database_path: Path | None = None) -> dict[str, object] | None:
-    with connection(database_path) as conn:
-        row = conn.execute(
-            '''SELECT id, username, email, password_hash, avatar_url, display_name, bio, is_active, created_at, updated_at
-                 FROM users
-                WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE
-                LIMIT 1''',
-            (identifier, identifier),
-        ).fetchone()
-    return _user_row(row)
+def get_user_by_identifier(identifier: str) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT * FROM users WHERE lower(username) = lower(%s) OR lower(email) = lower(%s) LIMIT 1',
+                (identifier, identifier),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
-def update_user_password_hash(user_id: int, password_hash: str, database_path: Path | None = None) -> None:
-    with connection(database_path) as conn:
+def update_user_password_hash(user_id: int, password_hash: str) -> None:
+    with connection() as conn:
         conn.execute(
-            "UPDATE users SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+            'UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
             (password_hash, user_id),
         )
-        conn.commit()
 
 
 def create_auth_session(
     user_id: int,
     token_hash: str,
     expires_at: int,
-    database_path: Path | None = None,
     *,
-    max_sessions: int = 5,
+    max_sessions: int,
 ) -> None:
-    now_epoch = int(datetime.now(timezone.utc).timestamp())
-    with connection(database_path) as conn:
-        conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (now_epoch,))
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM auth_sessions WHERE expires_at <= %s', (int(datetime.now(timezone.utc).timestamp()),))
+            cur.execute(
+                'INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)',
+                (token_hash, user_id, expires_at),
+            )
+            cur.execute(
+                """
+                DELETE FROM auth_sessions
+                WHERE token_hash IN (
+                    SELECT token_hash FROM auth_sessions
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC, token_hash DESC
+                    OFFSET %s
+                )
+                """,
+                (user_id, max_sessions),
+            )
+
+
+def get_user_by_session(token_hash: str, now_epoch: int) -> dict[str, object] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.*
+                FROM auth_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = %s AND s.expires_at > %s AND u.is_active = TRUE
+                """,
+                (token_hash, now_epoch),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def delete_auth_session(token_hash: str) -> None:
+    with connection() as conn:
+        conn.execute('DELETE FROM auth_sessions WHERE token_hash = %s', (token_hash,))
+
+
+def delete_other_auth_sessions(user_id: int, keep_token_hash: str) -> None:
+    with connection() as conn:
         conn.execute(
-            'INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)',
-            (token_hash, user_id, expires_at),
-        )
-        conn.execute(
-            '''DELETE FROM auth_sessions
-                WHERE user_id = ?
-                  AND token_hash NOT IN (
-                      SELECT token_hash
-                        FROM auth_sessions
-                       WHERE user_id = ?
-                       ORDER BY rowid DESC
-                       LIMIT ?
-                  )''',
-            (user_id, user_id, max_sessions),
-        )
-        conn.commit()
-
-
-def get_user_by_session(
-    token_hash: str,
-    now_epoch: int,
-    database_path: Path | None = None,
-) -> dict[str, object] | None:
-    with connection(database_path) as conn:
-        row = conn.execute(
-            '''SELECT u.id, u.username, u.email, u.password_hash, u.avatar_url, u.display_name, u.bio, u.is_active, u.created_at, u.updated_at
-                 FROM auth_sessions s
-                 JOIN users u ON u.id = s.user_id
-                WHERE s.token_hash = ?
-                  AND s.expires_at > ?
-                  AND u.is_active = 1
-                LIMIT 1''',
-            (token_hash, now_epoch),
-        ).fetchone()
-    return _user_row(row)
-
-
-def delete_auth_session(token_hash: str, database_path: Path | None = None) -> None:
-    with connection(database_path) as conn:
-        conn.execute('DELETE FROM auth_sessions WHERE token_hash = ?', (token_hash,))
-        conn.commit()
-
-
-def delete_other_auth_sessions(
-    user_id: int,
-    keep_token_hash: str,
-    database_path: Path | None = None,
-) -> None:
-    with connection(database_path) as conn:
-        conn.execute(
-            'DELETE FROM auth_sessions WHERE user_id = ? AND token_hash <> ?',
+            'DELETE FROM auth_sessions WHERE user_id = %s AND token_hash <> %s',
             (user_id, keep_token_hash),
         )
-        conn.commit()
 
 
-def delete_expired_auth_sessions(now_epoch: int, database_path: Path | None = None) -> int:
-    with connection(database_path) as conn:
-        cursor = conn.execute('DELETE FROM auth_sessions WHERE expires_at <= ?', (now_epoch,))
-        conn.commit()
-        return cursor.rowcount
+def delete_expired_auth_sessions(now_epoch: int) -> int:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM auth_sessions WHERE expires_at <= %s', (now_epoch,))
+            return cur.rowcount
+
+
+def count_auth_sessions(user_id: int) -> int:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT COUNT(*) AS count FROM auth_sessions WHERE user_id = %s', (user_id,))
+            return int(cur.fetchone()['count'])
 
 
 def update_user_profile(
@@ -359,170 +336,63 @@ def update_user_profile(
     email: str,
     display_name: str | None,
     bio: str | None,
-    database_path: Path | None = None,
 ) -> dict[str, object]:
-    with connection(database_path) as conn:
-        conn.execute(
-            """UPDATE users
-                  SET username = ?, email = ?, display_name = ?, bio = ?,
-                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE id = ?""",
-            (username, email, display_name, bio, user_id),
-        )
-        conn.commit()
-    user = get_user_by_id(user_id, database_path)
-    if user is None:
-        raise RuntimeError('User profile update failed')
-    return user
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET username = %s, email = %s, display_name = %s, bio = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (username, email, display_name, bio, user_id),
+            )
+            return dict(cur.fetchone())
 
 
-
-def count_auth_sessions(database_path: Path | None = None) -> int:
-    with connection(database_path) as conn:
-        row = conn.execute('SELECT COUNT(*) AS total FROM auth_sessions').fetchone()
-    return int(row['total']) if row else 0
-
-
-def _user_row(row: sqlite3.Row | None) -> dict[str, object] | None:
-    if row is None:
-        return None
-    return {
-        'id': int(row['id']),
-        'username': row['username'],
-        'email': row['email'],
-        'password_hash': row['password_hash'],
-        'avatar_url': row['avatar_url'],
-        'display_name': row['display_name'],
-        'bio': row['bio'],
-        'is_active': bool(row['is_active']),
-        'created_at': row['created_at'],
-        'updated_at': row['updated_at'],
-    }
+def list_favorites(user_id: int) -> list[dict[str, object]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_content_projection('c', include_detail=False)}
+                FROM favorites f
+                JOIN content_items c ON c.id = f.content_id
+                WHERE f.user_id = %s
+                ORDER BY f.created_at DESC
+                """,
+                (user_id,),
+            )
+            return [_normalize_content_row(row) for row in cur.fetchall()]
 
 
-def list_favorites(user_id: int, database_path: Path | None = None) -> list[dict[str, object]]:
-    query = '''
-        SELECT c.id, c.title, c.category, c.category_label, c.release_year, c.score,
-               c.maturity, c.format, c.genres_json, c.artwork
-          FROM favorites f
-          JOIN content_items c ON c.id = f.content_id
-         WHERE f.user_id = ?
-         ORDER BY f.created_at DESC, c.display_order ASC
-    '''
-    with connection(database_path) as conn:
-        rows = conn.execute(query, (user_id,)).fetchall()
-
-    return [
-        {
-            'id': row['id'],
-            'title': row['title'],
-            'category': row['category'],
-            'category_label': row['category_label'],
-            'year': row['release_year'],
-            'score': row['score'],
-            'maturity': row['maturity'],
-            'format': row['format'],
-            'genres': json.loads(row['genres_json']),
-            'artwork': row['artwork'],
-        }
-        for row in rows
-    ]
+def add_favorite(user_id: int, content_id: str) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1 FROM content_items WHERE id = %s', (content_id,))
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                'INSERT INTO favorites (user_id, content_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                (user_id, content_id),
+            )
+            return True
 
 
-def add_favorite(user_id: int, content_id: str, database_path: Path | None = None) -> bool:
-    """Adds one catalog item idempotently. Returns False when the content id does not exist."""
-    with connection(database_path) as conn:
-        exists = conn.execute('SELECT 1 FROM content_items WHERE id = ?', (content_id,)).fetchone()
-        if exists is None:
-            return False
-        conn.execute(
-            'INSERT OR IGNORE INTO favorites (user_id, content_id) VALUES (?, ?)',
-            (user_id, content_id),
-        )
-        conn.commit()
-    return True
+def remove_favorite(user_id: int, content_id: str) -> None:
+    with connection() as conn:
+        conn.execute('DELETE FROM favorites WHERE user_id = %s AND content_id = %s', (user_id, content_id))
 
 
-def remove_favorite(user_id: int, content_id: str, database_path: Path | None = None) -> None:
-    """Removes one favorite idempotently without exposing whether another user saved the item."""
-    with connection(database_path) as conn:
-        conn.execute(
-            'DELETE FROM favorites WHERE user_id = ? AND content_id = ?',
-            (user_id, content_id),
-        )
-        conn.commit()
+def banner_exists(banner_id: str) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1 FROM featured_banners WHERE id = %s AND is_active = TRUE', (banner_id,))
+            return cur.fetchone() is not None
 
 
-def banner_exists(banner_id: str, database_path: Path | None = None) -> bool:
-    with connection(database_path) as conn:
-        row = conn.execute('SELECT 1 FROM featured_banners WHERE id = ?', (banner_id,)).fetchone()
-    return row is not None
-
-
-def list_banner_comments(
-    banner_id: str,
-    viewer_user_id: int | None = None,
-    database_path: Path | None = None,
-) -> list[dict[str, object]]:
-    viewer_id = viewer_user_id if viewer_user_id is not None else -1
-    query = '''
-        SELECT c.id, c.banner_id, c.body, c.created_at,
-               u.username, u.display_name,
-               CASE WHEN c.user_id = ? THEN 1 ELSE 0 END AS is_owner
-          FROM banner_comments c
-          JOIN users u ON u.id = c.user_id
-         WHERE c.banner_id = ?
-         ORDER BY c.created_at DESC, c.id DESC
-    '''
-    with connection(database_path) as conn:
-        rows = conn.execute(query, (viewer_id, banner_id)).fetchall()
-    return [_banner_comment_row(row) for row in rows]
-
-
-def create_banner_comment(
-    banner_id: str,
-    user_id: int,
-    body: str,
-    database_path: Path | None = None,
-) -> dict[str, object] | None:
-    with connection(database_path) as conn:
-        banner = conn.execute('SELECT 1 FROM featured_banners WHERE id = ?', (banner_id,)).fetchone()
-        if banner is None:
-            return None
-        cursor = conn.execute(
-            'INSERT INTO banner_comments (banner_id, user_id, body) VALUES (?, ?, ?)',
-            (banner_id, user_id, body),
-        )
-        comment_id = int(cursor.lastrowid)
-        conn.commit()
-        row = conn.execute(
-            '''SELECT c.id, c.banner_id, c.body, c.created_at,
-                      u.username, u.display_name, 1 AS is_owner
-                 FROM banner_comments c
-                 JOIN users u ON u.id = c.user_id
-                WHERE c.id = ? AND c.banner_id = ?''',
-            (comment_id, banner_id),
-        ).fetchone()
-    return _banner_comment_row(row) if row is not None else None
-
-
-def delete_banner_comment(
-    banner_id: str,
-    comment_id: int,
-    user_id: int,
-    database_path: Path | None = None,
-) -> bool:
-    """Deletes only a comment owned by the authenticated user."""
-    with connection(database_path) as conn:
-        cursor = conn.execute(
-            'DELETE FROM banner_comments WHERE id = ? AND banner_id = ? AND user_id = ?',
-            (comment_id, banner_id, user_id),
-        )
-        conn.commit()
-        return cursor.rowcount == 1
-
-
-def _banner_comment_row(row: sqlite3.Row) -> dict[str, object]:
+def _banner_comment_row(row: dict[str, object], viewer_id: int | None) -> dict[str, object]:
     return {
         'id': int(row['id']),
         'banner_id': str(row['banner_id']),
@@ -531,6 +401,138 @@ def _banner_comment_row(row: sqlite3.Row) -> dict[str, object]:
             'username': str(row['username']),
             'display_name': str(row['display_name']) if row['display_name'] else None,
         },
-        'created_at': str(row['created_at']),
-        'is_owner': bool(row['is_owner']),
+        'created_at': row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']),
+        'is_owner': viewer_id is not None and int(row['user_id']) == viewer_id,
     }
+
+
+def list_banner_comments(banner_id: str, viewer_id: int | None) -> list[dict[str, object]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT bc.*, u.username, u.display_name
+                FROM banner_comments bc
+                JOIN users u ON u.id = bc.user_id
+                WHERE bc.banner_id = %s
+                ORDER BY bc.created_at DESC, bc.id DESC
+                """,
+                (banner_id,),
+            )
+            return [_banner_comment_row(row, viewer_id) for row in cur.fetchall()]
+
+
+def create_banner_comment(banner_id: str, user_id: int, body: str) -> dict[str, object] | None:
+    if not banner_exists(banner_id):
+        return None
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO banner_comments (banner_id, user_id, body)
+                VALUES (%s, %s, %s)
+                RETURNING id, banner_id, user_id, body, created_at
+                """,
+                (banner_id, user_id, body),
+            )
+            created = dict(cur.fetchone())
+            cur.execute('SELECT username, display_name FROM users WHERE id = %s', (user_id,))
+            created.update(cur.fetchone())
+            return _banner_comment_row(created, user_id)
+
+
+def delete_banner_comment(banner_id: str, comment_id: int, user_id: int) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM banner_comments WHERE id = %s AND banner_id = %s AND user_id = %s',
+                (comment_id, banner_id, user_id),
+            )
+            return cur.rowcount > 0
+
+
+def upsert_catalog_items(items: Sequence[dict[str, object]]) -> int:
+    if not items:
+        return 0
+    query = """
+        INSERT INTO content_items (
+            id, source, external_id, category, title, original_title, synopsis, genres,
+            cover_url, backdrop_url, studio, episodes, score, release_year, maturity,
+            format, status, origin, trailer_youtube_id, official_url, platform_links,
+            source_url, provider_updated_at, updated_at
+        ) VALUES (
+            %(id)s, %(source)s, %(external_id)s, %(category)s, %(title)s, %(original_title)s,
+            %(synopsis)s, %(genres)s::jsonb, %(cover_url)s, %(backdrop_url)s, %(studio)s,
+            %(episodes)s, %(score)s, %(release_year)s, %(maturity)s, %(format)s, %(status)s,
+            %(origin)s, %(trailer_youtube_id)s, %(official_url)s, %(platform_links)s::jsonb,
+            %(source_url)s, %(provider_updated_at)s, now()
+        )
+        ON CONFLICT (source, external_id) DO UPDATE SET
+            id = EXCLUDED.id,
+            category = EXCLUDED.category,
+            title = EXCLUDED.title,
+            original_title = EXCLUDED.original_title,
+            synopsis = EXCLUDED.synopsis,
+            genres = EXCLUDED.genres,
+            cover_url = EXCLUDED.cover_url,
+            backdrop_url = EXCLUDED.backdrop_url,
+            studio = EXCLUDED.studio,
+            episodes = EXCLUDED.episodes,
+            score = EXCLUDED.score,
+            release_year = EXCLUDED.release_year,
+            maturity = EXCLUDED.maturity,
+            format = EXCLUDED.format,
+            status = EXCLUDED.status,
+            origin = EXCLUDED.origin,
+            trailer_youtube_id = EXCLUDED.trailer_youtube_id,
+            official_url = EXCLUDED.official_url,
+            platform_links = EXCLUDED.platform_links,
+            source_url = EXCLUDED.source_url,
+            provider_updated_at = EXCLUDED.provider_updated_at,
+            updated_at = now()
+    """
+    normalized = []
+    for item in items:
+        row = dict(item)
+        row['genres'] = json.dumps(row.get('genres') or [])
+        row['platform_links'] = json.dumps(row.get('platform_links') or [])
+        normalized.append(row)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(query, normalized)
+    clear_public_query_caches()
+    return len(normalized)
+
+
+def refresh_featured_banners(limit: int = 4) -> int:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('UPDATE featured_banners SET is_active = FALSE, updated_at = now()')
+            cur.execute(
+                """
+                SELECT id, category, title
+                FROM content_items
+                WHERE backdrop_url IS NOT NULL OR cover_url IS NOT NULL
+                ORDER BY score DESC, release_year DESC NULLS LAST, title ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            selected = cur.fetchall()
+            for index, item in enumerate(selected):
+                banner_id = f"featured-{item['id']}"
+                eyebrow = f"{CATEGORY_LABELS.get(str(item['category']), str(item['category']))} destacado"
+                cur.execute(
+                    """
+                    INSERT INTO featured_banners (id, content_id, eyebrow, display_order, is_active, updated_at)
+                    VALUES (%s, %s, %s, %s, TRUE, now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        content_id = EXCLUDED.content_id,
+                        eyebrow = EXCLUDED.eyebrow,
+                        display_order = EXCLUDED.display_order,
+                        is_active = TRUE,
+                        updated_at = now()
+                    """,
+                    (banner_id, item['id'], eyebrow, index),
+                )
+    return len(selected)

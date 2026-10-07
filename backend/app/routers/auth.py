@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
+from psycopg.errors import UniqueViolation
 
 from app.auth_dependencies import require_current_user
 from app.auth_security import (
@@ -33,7 +33,7 @@ def public_user(user: dict[str, object]) -> UserResponse:
         id=int(user['id']),
         username=str(user['username']),
         email=str(user['email']),
-        avatar_url=str(user['avatar_url']) if user['avatar_url'] else None,
+        avatar_url=str(user['avatar_url']) if user.get('avatar_url') else None,
         display_name=str(user['display_name']) if user.get('display_name') else None,
         bio=str(user['bio']) if user.get('bio') else None,
         created_at=str(user['created_at']),
@@ -48,17 +48,11 @@ def _revoke_presented_session(request: Request) -> None:
 
 
 def _issue_session(request: Request, response: Response, user_id: int) -> None:
-    # Re-authentication rotates the session and revokes the token presented by this browser.
     _revoke_presented_session(request)
     token = generate_session_token()
     ttl_seconds = settings.session_ttl_hours * 60 * 60
     expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).timestamp())
-    create_auth_session(
-        user_id,
-        hash_session_token(token),
-        expires_at,
-        max_sessions=settings.max_sessions_per_user,
-    )
+    create_auth_session(user_id, hash_session_token(token), expires_at, max_sessions=settings.max_sessions_per_user)
     response.set_cookie(
         key=settings.session_cookie_name,
         value=token,
@@ -79,14 +73,10 @@ def _refresh_csrf_header(request: Request, response: Response) -> None:
 
 @router.post('/auth/register', response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, request: Request, response: Response) -> AuthResponse:
-    password = payload.password.get_secret_value()
     try:
-        user = create_user(payload.username, payload.email, hash_password(password))
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail='No fue posible registrar esa cuenta. Revisa usuario y correo.',
-        ) from exc
+        user = create_user(payload.username, payload.email, hash_password(payload.password.get_secret_value()))
+    except UniqueViolation as exc:
+        raise HTTPException(status_code=409, detail='No fue posible registrar esa cuenta. Revisa usuario y correo.') from exc
     _issue_session(request, response, int(user['id']))
     return AuthResponse(user=public_user(user))
 
@@ -98,11 +88,9 @@ def login(payload: LoginRequest, request: Request, response: Response) -> AuthRe
     stored_hash = str(user['password_hash']) if user is not None and bool(user['is_active']) else None
     password_valid = verify_password_or_dummy(stored_hash, password)
     if user is None or not bool(user['is_active']) or not password_valid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Usuario/correo o contraseña incorrectos.')
-
+        raise HTTPException(status_code=401, detail='Usuario/correo o contraseña incorrectos.')
     if password_needs_rehash(str(user['password_hash'])):
         update_user_password_hash(int(user['id']), hash_password(password))
-
     _issue_session(request, response, int(user['id']))
     return AuthResponse(user=public_user(user))
 
