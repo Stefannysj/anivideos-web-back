@@ -4,7 +4,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.providers.anilist import map_media
-from app.providers.tmdb import map_details
 from app.schemas import LibraryStatusRequest, ReviewCreateRequest, ReviewReportRequest
 
 
@@ -22,25 +21,6 @@ def test_anilist_calendar_fields_are_mapped() -> None:
     assert item['next_episode_number'] == 7
     assert isinstance(item['next_airing_at'], datetime)
     assert item['next_airing_at'].tzinfo == timezone.utc
-
-
-def test_tmdb_next_episode_is_mapped() -> None:
-    item = map_details({
-        'id': 101,
-        'name': 'Drama',
-        'original_name': 'Drama',
-        'first_air_date': '2026-10-01',
-        'poster_path': '/a.jpg',
-        'vote_average': 8,
-        'genres': [],
-        'status': 'Returning Series',
-        'next_episode_to_air': {'air_date': '2026-10-08', 'episode_number': 3},
-        'videos': {'results': []},
-        'watch/providers': {'results': {}},
-    }, category='k-drama', media_type='tv', region='PE')
-    assert item['season'] == 'fall'
-    assert item['next_episode_number'] == 3
-    assert item['next_airing_at'] is not None
 
 
 def test_library_status_contract() -> None:

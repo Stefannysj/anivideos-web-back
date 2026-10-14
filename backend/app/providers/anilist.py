@@ -120,7 +120,7 @@ def map_media(media: dict[str, Any]) -> dict[str, object]:
 
 async def fetch_catalog(*, pages: int = 2, per_page: int = 25) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
-    async with httpx.AsyncClient(timeout=20.0, headers={'User-Agent': 'AniVideos/0.17'}) as client:
+    async with httpx.AsyncClient(timeout=20.0, headers={'User-Agent': 'AniVideos/0.18'}) as client:
         for page in range(1, max(1, pages) + 1):
             response = await client.post(ANILIST_API, json={'query': QUERY, 'variables': {'page': page, 'perPage': per_page}})
             response.raise_for_status()

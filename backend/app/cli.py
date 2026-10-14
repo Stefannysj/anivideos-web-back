@@ -9,8 +9,8 @@ from app.services.catalog_sync import run_sync
 def main() -> None:
     parser = argparse.ArgumentParser(prog='anivideos')
     subparsers = parser.add_subparsers(dest='command', required=True)
-    sync = subparsers.add_parser('sync-content', help='Import and cache legal catalog metadata in PostgreSQL.')
-    sync.add_argument('--source', choices=('all', 'anilist', 'tmdb'), default='all')
+    sync = subparsers.add_parser('sync-content', help='Import and cache AniList metadata in PostgreSQL.')
+    sync.add_argument('--source', choices=('all', 'anilist'), default='anilist')
     sync.add_argument('--pages', type=int, default=1)
     args = parser.parse_args()
     if args.command == 'sync-content':

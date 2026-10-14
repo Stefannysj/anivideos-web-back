@@ -136,7 +136,7 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict[str, object] |
 async def fetch_catalog(token: str, *, region: str = 'PE', pages: int = 1) -> list[dict[str, object]]:
     if not token:
         raise RuntimeError('TMDB_READ_TOKEN is required for TMDB synchronization.')
-    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': 'AniVideos/0.17'}
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': 'AniVideos/0.18'}
     results: list[dict[str, object]] = []
     discoveries = [
         ('k-drama', 'tv', {'with_original_language': 'ko'}),
